@@ -32,6 +32,7 @@ using namespace mlir::triton;
 namespace {
 
 using ::mlir::LLVM::AMD::shuffleXor;
+using ::mlir::triton::AMD::ISAFamily;
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::SharedEncodingAttr;
@@ -52,6 +53,19 @@ struct DotOpMFMAConversionHelper {
                                      Location loc)
       : mfmaLayout(mfmaLayout), rewriter(rewriter),
         typeConverter(typeConverter), loc(loc), ctx(mfmaLayout.getContext()) {}
+
+  ISAFamily getISAFamily() const {
+    switch (mfmaLayout.getVersionMajor()) {
+    case 1:
+      return ISAFamily::CDNA1;
+    case 2:
+      return ISAFamily::CDNA2;
+    case 3:
+      return ISAFamily::CDNA3;
+    default:
+      return ISAFamily::Unknown;
+    }
+  }
 
   Value getThreadId() const {
     auto llvmIndexTy = typeConverter->getIndexType();
@@ -114,7 +128,8 @@ struct DotOpMFMAConversionHelper {
       while (subBlockSize < warpSize) {
         for (int i = 0; i < numScalars; ++i) {
           Value other_acc =
-              shuffleXor(loc, rewriter, accScalar[i], subBlockSize);
+              shuffleXor(loc, rewriter, accScalar[i], subBlockSize,
+                         getISAFamily());
           if (elemType.isInteger(32))
             accScalar[i] = add(accScalar[i], other_acc);
           else

@@ -1,6 +1,7 @@
 #ifndef TRITON_CONVERSION_TRITONGPU_TO_LLVM_TARGETUTILS_H
 #define TRITON_CONVERSION_TRITONGPU_TO_LLVM_TARGETUTILS_H
 
+#include <cstdint>
 #include "llvm/ADT/StringRef.h"
 
 namespace mlir::triton::AMD {
@@ -15,6 +16,15 @@ enum class ISAFamily {
   RDNA1,
   RDNA2,
   RDNA3,
+};
+
+// A partial definition of the DPP control values used by the lowering.
+enum class DppCtrl : uint32_t {
+  QUAD_PERM_FIRST = 0,
+  ROW_SHL0 = 0x100,
+  ROW_SHR0 = 0x110,
+  BCAST15 = 0x142,
+  BCAST31 = 0x143
 };
 
 // Deduces the corresponding ISA family for the given target gfx |arch|.
