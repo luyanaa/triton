@@ -251,4 +251,5 @@ bool TargetInfo::supportVectorizedAtomics() const {
   return true;
 }
 
+
 } // namespace mlir::triton::AMD
