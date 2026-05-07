@@ -144,12 +144,12 @@ static Value shuffleCommon(Location loc, RewriterBase &rewriter, Value val,
       return bpermute(lineId);
     } else {
       if (!llvm::is_contained(
-              {ISAFamily::VEGA20, ISAFamily::CDNA1, ISAFamily::CDNA2,
-               ISAFamily::CDNA3, ISAFamily::RDNA1, ISAFamily::RDNA2,
-               ISAFamily::RDNA3},
+              {ISAFamily::GCN5, ISAFamily::VEGA20, ISAFamily::CDNA1,
+               ISAFamily::CDNA2, ISAFamily::CDNA3, ISAFamily::RDNA1,
+               ISAFamily::RDNA2, ISAFamily::RDNA3},
               isaFamily)) {
-        // DPP is supported for VEGA20/CDNA1-3/RDNA1-3; other architectures
-        // fall back to ds_swizzle.
+        // DPP is supported for GCN5, VEGA20, CDNA1-3, and RDNA1-3.
+        // Other architectures fall back to ds_swizzle.
         //
         // This map facilates the butterfly shuffle pattern for a stride less
         // than 16. The pattern stride is the key of the map.

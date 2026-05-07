@@ -135,9 +135,9 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
     return false;
 
   if (!llvm::is_contained(
-          {ISAFamily::VEGA20, ISAFamily::CDNA1, ISAFamily::CDNA2,
-           ISAFamily::CDNA3, ISAFamily::RDNA1, ISAFamily::RDNA2,
-           ISAFamily::RDNA3},
+          {ISAFamily::GCN5, ISAFamily::VEGA20, ISAFamily::CDNA1,
+           ISAFamily::CDNA2, ISAFamily::CDNA3, ISAFamily::RDNA1,
+           ISAFamily::RDNA2, ISAFamily::RDNA3},
           getISAFamily())) {
     return false;
   }
@@ -393,6 +393,7 @@ bool TargetInfo::supportVectorizedAtomics() const {
   // atomics.
   return true;
 }
+
 
 
 } // namespace mlir::triton::AMD
