@@ -211,3 +211,71 @@ module attributes {"triton_gpu.target" = "cuda:80", "triton_gpu.num-ctas" = 1 : 
     tt.return %td : tensor<128x128xf32, #mma>
   }
 }
+// -----
+#rhs = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [2, 2], order = [0, 1]}>
+#rhs_trans = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0]}>
+#mma_v1 = #triton_gpu.nvidia_mma<{versionMajor = 1, versionMinor = 1, warpsPerCTA = [2, 2]}>
+#dot_b = #triton_gpu.dot_op<{opIdx = 1, parent = #mma_v1}>
+module attributes {"triton_gpu.target" = "cuda:70", "triton_gpu.num-warps" = 4 : i32, "triton_gpu.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tt.func @volta_rhs_k64
+  // CHECK-NOT: tt.trans {{.*}} : !tt.memdesc
+  // CHECK: %[[TRANS:.*]] = tt.trans %arg0
+  // CHECK: %[[REUSE:.*]] = arith.extf %[[TRANS]]
+  // CHECK-NOT: tt.trans {{.*}} : !tt.memdesc
+  // CHECK: %[[ALLOC:.*]] = triton_gpu.local_alloc %[[TRANS]]
+  // CHECK-SAME: !tt.memdesc<64x32xf16,
+  // CHECK-NOT: tt.trans {{.*}} : !tt.memdesc
+  // CHECK: %[[LOAD:.*]] = triton_gpu.local_load %[[ALLOC]]
+  // CHECK-SAME: -> tensor<64x32xf16, #triton_gpu.dot_op<
+  // CHECK-NOT: tt.trans {{.*}} : !tt.memdesc
+  // CHECK: tt.return %[[REUSE]], %[[LOAD]]
+  tt.func @volta_rhs_k64(%arg0: tensor<32x64xf16, #rhs>) -> (tensor<64x32xf32, #rhs_trans>, tensor<64x32xf16, #dot_b>) {
+    %trans = tt.trans %arg0 {order = array<i32: 1, 0>} : tensor<32x64xf16, #rhs> -> tensor<64x32xf16, #rhs_trans>
+    %reuse = arith.extf %trans : tensor<64x32xf16, #rhs_trans> to tensor<64x32xf32, #rhs_trans>
+    %converted = triton_gpu.convert_layout %trans : tensor<64x32xf16, #rhs_trans> -> tensor<64x32xf16, #dot_b>
+    tt.return %reuse, %converted : tensor<64x32xf32, #rhs_trans>, tensor<64x32xf16, #dot_b>
+  }
+}
+
+// -----
+#a = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [1, 1], order = [1, 0]}>
+#a_trans = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 1], order = [0, 1]}>
+#mma_v1 = #triton_gpu.nvidia_mma<{versionMajor = 1, versionMinor = 14, warpsPerCTA = [1, 1]}>
+#dot_a = #triton_gpu.dot_op<{opIdx = 0, parent = #mma_v1}>
+module attributes {"triton_gpu.target" = "cuda:70", "triton_gpu.num-warps" = 1 : i32, "triton_gpu.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tt.func @volta_a_transpose_k16
+  // CHECK-NOT: tt.trans {{.*}} : !tt.memdesc
+  // CHECK: %[[TRANS:.*]] = tt.trans %arg0
+  // CHECK-NOT: tt.trans {{.*}} : !tt.memdesc
+  // CHECK: %[[ALLOC:.*]] = triton_gpu.local_alloc %[[TRANS]]
+  // CHECK-SAME: !tt.memdesc<16x16xf16,
+  // CHECK-NOT: tt.trans {{.*}} : !tt.memdesc
+  // CHECK: %[[LOAD:.*]] = triton_gpu.local_load %[[ALLOC]]
+  // CHECK-SAME: -> tensor<16x16xf16, #triton_gpu.dot_op<
+  // CHECK-NOT: tt.trans {{.*}} : !tt.memdesc
+  // CHECK: tt.return %[[LOAD]]
+  tt.func @volta_a_transpose_k16(%arg0: tensor<16x16xf16, #a>) -> tensor<16x16xf16, #dot_a> {
+    %trans = tt.trans %arg0 {order = array<i32: 1, 0>} : tensor<16x16xf16, #a> -> tensor<16x16xf16, #a_trans>
+    %converted = triton_gpu.convert_layout %trans : tensor<16x16xf16, #a_trans> -> tensor<16x16xf16, #dot_a>
+    tt.return %converted : tensor<16x16xf16, #dot_a>
+  }
+}
+// -----
+#rhs = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [2, 2], order = [0, 1]}>
+#rhs_trans = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0]}>
+#mma_v2 = #triton_gpu.nvidia_mma<{versionMajor = 2, versionMinor = 0, warpsPerCTA = [2, 2], instrShape = [16, 8]}>
+#dot_b = #triton_gpu.dot_op<{opIdx = 1, parent = #mma_v2, kWidth = 2}>
+module attributes {"triton_gpu.target" = "cuda:80", "triton_gpu.num-warps" = 4 : i32, "triton_gpu.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tt.func @ampere_rhs_transpose
+  // CHECK: %[[ALLOC:.*]] = triton_gpu.local_alloc %arg0
+  // CHECK: %[[TRANS:.*]] = tt.trans %[[ALLOC]]
+  // CHECK-SAME: : !tt.memdesc<32x64xf16,
+  // CHECK: %[[LOAD:.*]] = triton_gpu.local_load %[[TRANS]]
+  // CHECK-SAME: -> tensor<64x32xf16, #triton_gpu.dot_op<
+  // CHECK: tt.return %[[LOAD]]
+  tt.func @ampere_rhs_transpose(%arg0: tensor<32x64xf16, #rhs>) -> tensor<64x32xf16, #dot_b> {
+    %trans = tt.trans %arg0 {order = array<i32: 1, 0>} : tensor<32x64xf16, #rhs> -> tensor<64x32xf16, #rhs_trans>
+    %converted = triton_gpu.convert_layout %trans : tensor<64x32xf16, #rhs_trans> -> tensor<64x32xf16, #dot_b>
+    tt.return %converted : tensor<64x32xf16, #dot_b>
+  }
+}

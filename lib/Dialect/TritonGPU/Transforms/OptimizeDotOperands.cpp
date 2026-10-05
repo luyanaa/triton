@@ -31,33 +31,51 @@ public:
     if (!trans || trans.getOrder() != ArrayRef<int32_t>{1, 0})
       return failure();
 
+    auto sharedLoadTy = cast<RankedTensorType>(cvtOp.getType());
+    auto dotEnc = dyn_cast<DotOperandEncodingAttr>(sharedLoadTy.getEncoding());
+    if (!dotEnc)
+      return failure();
+
+    auto mmaEnc = dyn_cast<NvidiaMmaEncodingAttr>(dotEnc.getParent());
+    if (mmaEnc && mmaEnc.isVolta()) {
+      auto transTy = cast<RankedTensorType>(trans.getType());
+      auto sharedEnc = SharedEncodingAttr::get(
+          getContext(), dotEnc, transTy.getShape(),
+          /*order=*/getOrder(transTy.getEncoding()),
+          triton::gpu::getCTALayout(transTy.getEncoding()),
+          transTy.getElementType());
+      auto sharedMemorySpace = SharedMemorySpaceAttr::get(getContext());
+      auto sharedTy = MemDescType::get(
+          transTy.getShape(), transTy.getElementType(), sharedEnc,
+          sharedMemorySpace);
+      auto alloc = rewriter.create<LocalAllocOp>(
+          trans.getLoc(), sharedTy, trans.getResult());
+      auto load =
+          rewriter.create<LocalLoadOp>(cvtOp.getLoc(), sharedLoadTy, alloc);
+      // Replace only the conversion; `trans` may have other tensor users.
+      rewriter.replaceOp(cvtOp, load.getResult());
+      return success();
+    }
+
     auto srcTy = dyn_cast<RankedTensorType>(trans.getSrc().getType());
 
     if (auto srcCvt = trans.getSrc().getDefiningOp<ConvertLayoutOp>()) {
       srcTy = srcCvt.getSrc().getType();
     }
-    auto sharedLoadTy = cast<RankedTensorType>(cvtOp.getType());
-    auto cvtEncoding =
-        dyn_cast<DotOperandEncodingAttr>(sharedLoadTy.getEncoding());
-    if (!cvtEncoding)
-      return failure();
-
     // TODO(Qingyi): need to check whether the CTALayout of innerCvtEnc should
     // be used here. For tests where numCTAs = 1, this is not a problem since
     // all CTALayouts are the same.
     //
-    // Set needTrans to true here. newInnerCvtEnc is computed based on
-    // argEncoding which is before the transpose. Without needTrans we will
-    // compute vec and maxPhase based on incorrect m, n and k size of mma. The
-    // type inference of TransOp simply swap the order but doesn't fix the vec
-    // and maxPhase for the YType, hence it would causing incorrect swizzling
-    // code.
+    // Volta's SharedEncodingAttr inference ignores needTrans, so Volta is
+    // handled above by materializing the transposed tensor in shared memory.
+    // Ampere's inference uses needTrans to account for the transpose when
+    // deriving the shared-memory layout.
     auto newInnerCvtEnc =
-        SharedEncodingAttr::get(getContext(), cvtEncoding, srcTy.getShape(),
+        SharedEncodingAttr::get(getContext(), dotEnc, srcTy.getShape(),
                                 /*order=*/getOrder(srcTy.getEncoding()),
                                 triton::gpu::getCTALayout(srcTy.getEncoding()),
                                 srcTy.getElementType(), /*needTrans=*/true);
-    if (newInnerCvtEnc == cvtEncoding)
+    if (newInnerCvtEnc == dotEnc)
       return failure();
     rewriter.setInsertionPoint(trans);
     auto sharedMemorySpace = SharedMemorySpaceAttr::get(getContext());
