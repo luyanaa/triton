@@ -173,7 +173,6 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
                             unsigned numLaneToReduce,
                             unsigned interleave) const {
-  auto b = TritonLLVMOpBuilder(loc, rewriter);
   // DPP reduction assumes one contiguous reduction across the full wave.
   if (numLaneToReduce != 64 || interleave != 1)
     return false;
@@ -300,7 +299,7 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
     std::string intrinsic = "llvm.amdgcn.readlane";
     Value result =
         LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsic, actualType,
-                                        ValueRange{buf, b.i32_val(lastLane)})
+                                        ValueRange{buf, i32_val(lastLane)})
             ->getResult(0);
 
     result = truncAndCastFromInt(rewriter, loc, result, valType, 16);

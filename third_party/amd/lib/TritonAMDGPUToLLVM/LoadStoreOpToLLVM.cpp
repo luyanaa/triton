@@ -423,7 +423,6 @@ struct BufferLoadToLocalOpConversion
           op, "target does not support buffer load to LDS");
 
     auto loc = op.getLoc();
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
     LLVM::AMD::BufferEmitter bufferEmitter(rewriter, loc, targetInfo);
     Value ptr = op.getPtr();
     Value offset = op.getOffsets();
@@ -473,7 +472,7 @@ struct BufferLoadToLocalOpConversion
         adaptor.getPtr(), adaptor.getStride());
     for (size_t i = 0; i < shmemAddrs.size(); ++i) {
       size_t srcIdx = i * vec;
-      Value pred = maskElems.empty() ? b.true_val() : maskElems[srcIdx];
+      Value pred = maskElems.empty() ? true_val() : maskElems[srcIdx];
       bufferEmitter.emitLoadToLds(vecTy, rsrcDesc, offsetElems[srcIdx],
                                   shmemAddrs[i], pred, op.getCache());
       if (!otherElems.empty()) {
@@ -481,12 +480,12 @@ struct BufferLoadToLocalOpConversion
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
         Value storePred = maskElems.empty()
                               ? int_val(1, 0)
-                              : b.icmp_ne(maskElems[srcIdx], b.true_val());
+                              : icmp_ne(maskElems[srcIdx], true_val());
         llStore(rewriter, loc, shmemAddrs[i], storeVal, storePred, 0,
                 triton::CacheModifier::NONE);
       }
     }
-    rewriter.replaceOp(op, b.i32_val(0));
+    rewriter.replaceOp(op, i32_val(0));
     return success();
   }
 };
@@ -516,7 +515,6 @@ struct AsyncCopyGlobalToLocalOpConversion
           op, "global load to LDS does not support eviction or volatility");
 
     auto loc = op.getLoc();
-    auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto srcTy = op.getSrc().getType();
     if (!isa<BlockedEncodingAttr, SliceEncodingAttr>(srcTy.getEncoding()))
       return rewriter.notifyMatchFailure(
@@ -551,18 +549,22 @@ struct AsyncCopyGlobalToLocalOpConversion
     if (!targetInfo.supportsGlobalLoadLDSBitWidth(vecBits))
       return rewriter.notifyMatchFailure(
           op, "global load to LDS does not support the required load width");
-    Value cacheModifiers =
-        b.i32_val(LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
-            op.getCache(), /*isBufferLoad=*/false, targetInfo));
+    // This ROCDL revision lacks GlobalLoadLDSOp; use a regular global load
+    // followed by an LDS store instead.
+    auto emitLoadToLds = [&](Value src, Value dst) {
+      Value data = llLoad(rewriter, loc, src, vecTy, true_val(),
+                          rewriter.create<LLVM::UndefOp>(loc, vecTy), 0,
+                          op.getCache());
+      llStore(rewriter, loc, dst, data, true_val(), 0,
+              triton::CacheModifier::NONE);
+    };
     SmallVector<Value> otherElems;
     if (op.getOther())
       otherElems = unpackLLElements(loc, adaptor.getOther(), rewriter);
     for (size_t i = 0; i < shmemAddrs.size(); ++i) {
       size_t srcIdx = i * maxVec;
       if (maskElems.empty()) {
-        rewriter.create<ROCDL::GlobalLoadLDSOp>(
-            loc, srcElems[srcIdx], shmemAddrs[i], b.i32_val(vecBits / 8),
-            b.i32_val(0), cacheModifiers);
+        emitLoadToLds(srcElems[srcIdx], shmemAddrs[i]);
         continue;
       }
       Block *currentBlock = rewriter.getInsertionBlock();
@@ -573,20 +575,18 @@ struct AsyncCopyGlobalToLocalOpConversion
       rewriter.create<LLVM::CondBrOp>(loc, maskElems[srcIdx], loadBlock,
                                       afterLoad);
       rewriter.setInsertionPointToStart(loadBlock);
-      rewriter.create<ROCDL::GlobalLoadLDSOp>(
-          loc, srcElems[srcIdx], shmemAddrs[i], b.i32_val(vecBits / 8),
-          b.i32_val(0), cacheModifiers);
+      emitLoadToLds(srcElems[srcIdx], shmemAddrs[i]);
       rewriter.create<LLVM::BrOp>(loc, afterLoad);
       rewriter.setInsertionPointToStart(afterLoad);
       if (!otherElems.empty()) {
         Value storeVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
         llStore(rewriter, loc, shmemAddrs[i], storeVal,
-                b.icmp_ne(maskElems[srcIdx], b.true_val()), 0,
+                icmp_ne(maskElems[srcIdx], true_val()), 0,
                 triton::CacheModifier::NONE);
       }
     }
-    rewriter.replaceOp(op, b.i32_val(0));
+    rewriter.replaceOp(op, i32_val(0));
     return success();
   }
 };
@@ -616,8 +616,8 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     unsigned highBits = (op.getNum() >> 4) << 14;
     unsigned waitValue = lowBits | highBits | ~0xC00Fu;
     rewriter.create<ROCDL::WaitcntOp>(op.getLoc(), waitValue);
-    rewriter.replaceOp(op,
-                       TritonLLVMOpBuilder(op.getLoc(), rewriter).i32_val(0));
+    rewriter.replaceOp(
+        op, LLVM::createConstantI32(op.getLoc(), rewriter, 0));
     return success();
   }
 
@@ -632,7 +632,7 @@ struct AsyncCommitGroupOpConversion
   matchAndRewrite(AsyncCommitGroupOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOp(op,
-                       TritonLLVMOpBuilder(op.getLoc(), rewriter).i32_val(0));
+                       LLVM::createConstantI32(op.getLoc(), rewriter, 0));
     return success();
   }
 };
