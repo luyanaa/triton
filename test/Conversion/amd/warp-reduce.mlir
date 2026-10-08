@@ -19,6 +19,9 @@ module attributes {"triton_gpu.target" = "hip:gfx942", "triton_gpu.num-ctas" = 1
   // GFX9-NOT: with 322,
   // GFX9-NOT: with 323,
   // GFX9: rocdl.ds_swizzle
+  // GFX9-NOT: with 322,
+  // GFX9-NOT: with 323,
+  // GFX9: llvm.return
   tt.func @reduce_max_wave64(%arg0: tensor<64xf32, #blocked64>) -> f32 {
     %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
     ^bb0(%lhs: f32, %rhs: f32):
@@ -31,6 +34,9 @@ module attributes {"triton_gpu.target" = "hip:gfx942", "triton_gpu.num-ctas" = 1
   // GFX9-NOT: with 322,
   // GFX9-NOT: with 323,
   // GFX9: rocdl.ds_swizzle
+  // GFX9-NOT: with 322,
+  // GFX9-NOT: with 323,
+  // GFX9: llvm.return
   tt.func @reduce_min_wave64(%arg0: tensor<64xf32, #blocked64>) -> f32 {
     %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
     ^bb0(%lhs: f32, %rhs: f32):
@@ -48,6 +54,9 @@ module attributes {"triton_gpu.target" = "hip:gfx1010", "triton_gpu.num-ctas" = 
   // RDNA-NOT: with 322,
   // RDNA-NOT: with 323,
   // RDNA: rocdl.ds_swizzle
+  // RDNA-NOT: with 322,
+  // RDNA-NOT: with 323,
+  // RDNA: llvm.return
   tt.func @reduce_add_wave32(%arg0: tensor<32xf32, #blocked32>) -> f32 {
     %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
     ^bb0(%lhs: f32, %rhs: f32):

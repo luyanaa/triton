@@ -104,7 +104,11 @@ module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 :
     // CHECK-NOT: with 322,
     // CHECK-NOT: with 323,
     // CHECK: rocdl.ds_swizzle
+    // CHECK-NOT: with 322,
+    // CHECK-NOT: with 323,
     // CHECK: llvm.intr.maxnum
+    // CHECK-NOT: with 322,
+    // CHECK-NOT: with 323,
     // CHECK: llvm.return
     %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
     ^bb0(%arg1: f32, %arg2: f32):
@@ -160,7 +164,11 @@ module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 :
     // CHECK-NOT: with 322,
     // CHECK-NOT: with 323,
     // CHECK: rocdl.ds_swizzle
+    // CHECK-NOT: with 322,
+    // CHECK-NOT: with 323,
     // CHECK: llvm.intr.maxnum
+    // CHECK-NOT: with 322,
+    // CHECK-NOT: with 323,
     // CHECK: llvm.return
     %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
     ^bb0(%arg1: f32, %arg2: f32):
