@@ -1,6 +1,8 @@
+#include "llvm/ADT/STLExtras.h"
 #include "BufferOpsEmitter.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
+#include "SchedInstructions.h"
 #include "TargetInfo.h"
 #include "Utility.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
@@ -391,7 +393,240 @@ struct BufferLoadOpConversion
     Type llvmResultStructTy = getTypeConverter()->convertType(valueTy);
     Value resultStruct = packLLElements(loc, getTypeConverter(), loadedVals,
                                         rewriter, llvmResultStructTy);
+
+    const int numVecs = numElems / vec;
+    setNumGeneratedGlobalLoads(op, numVecs, vecTy);
+
     rewriter.replaceOp(op, {resultStruct});
+    return success();
+  }
+};
+
+struct BufferLoadToLocalOpConversion
+    : public ConvertOpToLLVMPattern<triton::amdgpu::BufferLoadToLocalOp>,
+      public LoadStoreConversionBase {
+  BufferLoadToLocalOpConversion(LLVMTypeConverter &converter,
+                                const AMD::TargetInfo &targetInfo,
+                                ModuleAxisInfoAnalysis &axisAnalysisPass,
+                                PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit),
+        LoadStoreConversionBase(targetInfo, axisAnalysisPass) {}
+
+  LogicalResult
+  matchAndRewrite(triton::amdgpu::BufferLoadToLocalOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!targetInfo.supportsBufferLoadToLocalBitWidth(32))
+      return rewriter.notifyMatchFailure(op,
+                                         "target does not support buffer load to LDS");
+
+    auto loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    LLVM::AMD::BufferEmitter bufferEmitter(rewriter, loc, targetInfo);
+    Value ptr = op.getPtr();
+    Value offset = op.getOffsets();
+    Value mask = op.getMask();
+    Value llPtr = adaptor.getPtr();
+    Value llOffset = adaptor.getOffsets();
+    Value llDst = adaptor.getDest();
+    Value llMask = adaptor.getMask();
+    Value llOther = adaptor.getOther();
+
+    RankedTensorType ptrType =
+        cast<RankedTensorType>(getPointerTypeWithShape(ptr, offset));
+    unsigned numElems = getTotalElemsPerThread(ptrType);
+    unsigned vec = getVectorSize(ptr, offset);
+    SmallVector<Value> maskElems =
+        getMaskElemsAndUpdateVeclen(rewriter, loc, llMask, mask, vec);
+    SmallVector<Value> offsetElems = unpackLLElements(loc, llOffset, rewriter);
+    SmallVector<Value> otherElems;
+    if (llOther)
+      otherElems = unpackLLElements(loc, llOther, rewriter);
+
+    auto dstTy = op.getDest().getType();
+    if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(ptrType, dstTy, vec))
+      return rewriter.notifyMatchFailure(op, "does not write coalesced into LDS");
+
+    auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
+    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
+        loc, llDst, resElemTy, rewriter);
+    VectorType vecTy;
+    SmallVector<Value> shmemAddrs;
+    bool ok = emitTransferBetweenRegistersAndShared(
+        ptrType, dstTy, resElemTy, static_cast<int32_t>(vec), smemObj.base,
+        smemObj.strides, loc, rewriter, targetInfo,
+        [&](VectorType vecTy_, Value shmemAddr) {
+          vecTy = vecTy_;
+          shmemAddrs.push_back(shmemAddr);
+        });
+    assert(ok);
+
+    int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
+    if (!targetInfo.supportsBufferLoadToLocalBitWidth(vecBits))
+      return rewriter.notifyMatchFailure(
+          op, "buffer load to local does not support the required load width");
+    setNumGeneratedGlobalLoads(op, numElems / vec, vecTy);
+    Value rsrcDesc = bufferEmitter.createResourceDescriptor(
+        adaptor.getPtr(), adaptor.getStride());
+    Value vecBytes = b.i32_val(vecBits / 8);
+    for (size_t i = 0; i < shmemAddrs.size(); ++i) {
+      size_t srcIdx = i * vec;
+      Value pred = maskElems.empty() ? b.true_val() : maskElems[srcIdx];
+      bufferEmitter.emitLoadToLds(vecTy, vecBytes, rsrcDesc,
+                                  offsetElems[srcIdx], shmemAddrs[i], pred,
+                                  op.getCache());
+      if (!otherElems.empty()) {
+        Value storeVal = packElementRangeIntoVector(
+            rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
+        Value storePred = maskElems.empty()
+                              ? int_val(1, 0)
+                              : b.icmp_ne(maskElems[srcIdx], b.true_val());
+        llStore(rewriter, loc, shmemAddrs[i], storeVal, storePred, 0,
+                triton::CacheModifier::NONE);
+      }
+    }
+    rewriter.replaceOp(op, b.i32_val(0));
+    return success();
+  }
+};
+
+struct AsyncCopyGlobalToLocalOpConversion
+    : public ConvertOpToLLVMPattern<triton::gpu::AsyncCopyGlobalToLocalOp>,
+      public LoadStoreConversionBase {
+  AsyncCopyGlobalToLocalOpConversion(LLVMTypeConverter &converter,
+                                     const AMD::TargetInfo &targetInfo,
+                                     ModuleAxisInfoAnalysis &axisAnalysisPass,
+                                     PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit),
+        LoadStoreConversionBase(targetInfo, axisAnalysisPass) {}
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::AsyncCopyGlobalToLocalOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    using AMD::ISAFamily;
+    if (!llvm::is_contained({ISAFamily::CDNA1, ISAFamily::CDNA2,
+                             ISAFamily::CDNA3}, targetInfo.getISAFamily()))
+      return rewriter.notifyMatchFailure(
+          op, "global load to LDS is only supported on CDNA1-3");
+
+    if (op.getEvict() != triton::EvictionPolicy::NORMAL ||
+        op.getIsVolatile())
+      return rewriter.notifyMatchFailure(
+          op, "global load to LDS does not support eviction or volatility");
+
+    auto loc = op.getLoc();
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto srcTy = op.getSrc().getType();
+    if (!isa<BlockedEncodingAttr, SliceEncodingAttr>(srcTy.getEncoding()))
+      return rewriter.notifyMatchFailure(op, "requires Blocked or Slice encoding for src");
+    if (srcTy.getShape().size() != 2)
+      return rewriter.notifyMatchFailure(op, "only supports 2d tensors");
+    auto dstTy = op.getResult().getType();
+    auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
+    Value llSrc = adaptor.getSrc();
+    auto srcElems = unpackLLElements(loc, llSrc, rewriter);
+    Value llDst = adaptor.getResult();
+    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
+        loc, llDst, resElemTy, rewriter);
+    unsigned maxVec = getVectorSize(op.getSrc());
+    SmallVector<Value> maskElems = getMaskElemsAndUpdateVeclen(
+        rewriter, loc, adaptor.getMask(), op.getMask(), maxVec);
+    if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(srcTy, dstTy, maxVec))
+      return rewriter.notifyMatchFailure(op, "does not write coalesced into LDS");
+
+    VectorType vecTy;
+    SmallVector<Value> shmemAddrs;
+    bool ok = emitTransferBetweenRegistersAndShared(
+        srcTy, dstTy, resElemTy, static_cast<int32_t>(maxVec), smemObj.base,
+        smemObj.strides, loc, rewriter, targetInfo,
+        [&](VectorType vecTy_, Value shmemAddr) {
+          vecTy = vecTy_;
+          shmemAddrs.push_back(shmemAddr);
+        });
+    assert(ok);
+    int vecBits = vecTy.getNumElements() * vecTy.getElementTypeBitWidth();
+    if (!targetInfo.supportsGlobalLoadLDSBitWidth(vecBits))
+      return rewriter.notifyMatchFailure(
+          op, "global load to LDS does not support the required load width");
+    Value cacheModifiers = b.i32_val(
+        LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
+            op.getCache(), /*isBufferLoad=*/false, targetInfo));
+    SmallVector<Value> otherElems;
+    if (op.getOther())
+      otherElems = unpackLLElements(loc, adaptor.getOther(), rewriter);
+    for (size_t i = 0; i < shmemAddrs.size(); ++i) {
+      size_t srcIdx = i * maxVec;
+      if (maskElems.empty()) {
+        rewriter.create<ROCDL::GlobalLoadLDSOp>(
+            loc, srcElems[srcIdx], shmemAddrs[i], b.i32_val(vecBits / 8),
+            b.i32_val(0), cacheModifiers);
+        continue;
+      }
+      Block *currentBlock = rewriter.getInsertionBlock();
+      Block *afterLoad =
+          rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
+      Block *loadBlock = rewriter.createBlock(afterLoad);
+      rewriter.setInsertionPointToEnd(currentBlock);
+      rewriter.create<LLVM::CondBrOp>(loc, maskElems[srcIdx], loadBlock,
+                                      afterLoad);
+      rewriter.setInsertionPointToStart(loadBlock);
+      rewriter.create<ROCDL::GlobalLoadLDSOp>(
+          loc, srcElems[srcIdx], shmemAddrs[i], b.i32_val(vecBits / 8),
+          b.i32_val(0), cacheModifiers);
+      rewriter.create<LLVM::BrOp>(loc, afterLoad);
+      rewriter.setInsertionPointToStart(afterLoad);
+      if (!otherElems.empty()) {
+        Value storeVal = packElementRangeIntoVector(
+            rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);
+        llStore(rewriter, loc, shmemAddrs[i], storeVal,
+                b.icmp_ne(maskElems[srcIdx], b.true_val()), 0,
+                triton::CacheModifier::NONE);
+      }
+    }
+    rewriter.replaceOp(op, b.i32_val(0));
+    return success();
+  }
+};
+
+struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
+  AsyncWaitOpConversion(LLVMTypeConverter &converter,
+                        const AMD::TargetInfo &targetInfo,
+                        PatternBenefit benefit)
+      : ConvertOpToLLVMPattern(converter, benefit), targetInfo(targetInfo) {}
+  LogicalResult
+  matchAndRewrite(AsyncWaitOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    using AMD::ISAFamily;
+    if (op.getNum() >= 64)
+      return rewriter.notifyMatchFailure(
+          op, "async wait does not support values >= 64");
+    auto family = targetInfo.getISAFamily();
+    bool isCdna = llvm::is_contained(
+        {ISAFamily::CDNA1, ISAFamily::CDNA2, ISAFamily::CDNA3}, family);
+    bool isGfx9Wait = op.getNum() == 0 &&
+                      llvm::is_contained(
+                          {ISAFamily::GCN5, ISAFamily::VEGA20}, family);
+    if (!isCdna && !isGfx9Wait)
+      return rewriter.notifyMatchFailure(
+          op, "async wait is supported on CDNA1-3 and GFX9 num=0");
+    unsigned lowBits = op.getNum() & 0xF;
+    unsigned highBits = (op.getNum() >> 4) << 14;
+    unsigned waitValue = lowBits | highBits | ~0xC00Fu;
+    rewriter.create<ROCDL::WaitcntOp>(op.getLoc(), waitValue);
+    rewriter.replaceOp(op, TritonLLVMOpBuilder(op.getLoc(), rewriter).i32_val(0));
+    return success();
+  }
+
+private:
+  const AMD::TargetInfo &targetInfo;
+};
+
+struct AsyncCommitGroupOpConversion
+    : public ConvertOpToLLVMPattern<AsyncCommitGroupOp> {
+  using ConvertOpToLLVMPattern<AsyncCommitGroupOp>::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(AsyncCommitGroupOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, TritonLLVMOpBuilder(op.getLoc(), rewriter).i32_val(0));
     return success();
   }
 };
@@ -874,7 +1109,11 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        PatternBenefit benefit) {
   patterns
       .add<AtomicCASOpConversion, AtomicRMWOpConversion, LoadOpConversion,
-           StoreOpConversion, BufferLoadOpConversion, BufferStoreOpConversion>(
-          typeConverter, targetInfo, axisInfoAnalysis, benefit);
+           StoreOpConversion, BufferLoadOpConversion,
+           BufferLoadToLocalOpConversion, BufferStoreOpConversion,
+           AsyncCopyGlobalToLocalOpConversion>(typeConverter, targetInfo,
+                                                axisInfoAnalysis, benefit);
+  patterns.add<AsyncWaitOpConversion>(typeConverter, targetInfo, benefit);
+  patterns.add<AsyncCommitGroupOpConversion>(typeConverter, benefit);
 }
 } // namespace mlir::triton::AMD

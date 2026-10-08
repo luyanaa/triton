@@ -63,11 +63,15 @@ struct BufferEmitter {
 
   // Create a resource descriptor that points to the area of memory we want to
   // load from
-  Value createResourceDescriptor(Value basePtr);
+  Value createResourceDescriptor(Value basePtr, Value blockStride = {});
 
   // Emit a predicated rocdl.raw.ptr.buffer.load
   Value emitLoad(Type type, Value rsrcDesc, Value offset, Value pred,
                  Value falseVal);
+
+  // Emit a predicated raw buffer load directly into LDS.
+  void emitLoadToLds(Type type, Value byteWidth, Value rsrcDesc, Value offset,
+                     Value dst, Value pred, triton::CacheModifier cm);
 
   // Emit a predicated rocdl.raw.ptr.buffer.store
   void emitStore(Value rsrcDesc, Value offset, Value data, Value pred);
@@ -75,7 +79,9 @@ struct BufferEmitter {
 private:
   // Fill common buffer operation arguments.
   void fillCommonArgs(Type type, Value rsrcDesc, Value vOffsetElems, Value pred,
-                      SmallVector<Value> &args);
+                      SmallVector<Value> &args,
+                      triton::CacheModifier cm = triton::CacheModifier::NONE,
+                      bool isBufferLoad = true);
 
   // Given a type, the buffer type can be either the same type
   // or a packed version. E.g., a vector of 8xfp16 can be bitcasted to

@@ -1,6 +1,7 @@
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Support/LLVM.h"
+#include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -166,6 +167,15 @@ void StreamPipeliner::createStreamCopy(
     auto select = builder.create<arith::SelectOp>(
         loc, loadOp.getType(), mask, sharedLoad.getResult(), other);
     result = select->getResults();
+  }
+
+  // If the currently processed `LoadOp` is labeled with an index regarding
+  // to which `DotOp` operand the corresponding data belongs to, then label the
+  // expanded `LocalStoreOp` with the same index. This is required for
+  // instruction scheduling hints to correctly count the emitted `ds_write`
+  // instructions for each GEMM tile.
+  if (auto attr = loadOp->getAttr(triton::amdgpu::OpIdxAttr::getMnemonic())) {
+    storeOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(), attr);
   }
 
   loadOp->replaceAllUsesWith(result);
@@ -685,6 +695,48 @@ bool StreamPipeliner::pipelineLoop() {
 }
 
 namespace {
+// Go through a single use chain to get the result of the target op after all
+// unary ops - e.g., `convert_layout`, `fp_to_fp`, etc.
+template <typename TargetOpType> Operation *passPrevUnaryOps(Value value) {
+  auto getNextUnaryOps = [](Value value) -> Operation * {
+    if (auto defOp = value.getDefiningOp()) {
+      if ((defOp->getNumOperands() == 1) || llvm::dyn_cast<TargetOpType>(defOp))
+        return defOp;
+    }
+    return nullptr;
+  };
+
+  auto unaryOp = getNextUnaryOps(value);
+  while (unaryOp) {
+    if (llvm::dyn_cast<TargetOpType>(unaryOp))
+      return unaryOp;
+    unaryOp = getNextUnaryOps(unaryOp->getOperand(0));
+  }
+  return nullptr;
+}
+
+// Annotate loads for the two multiplicands with their GEMM operand indices.
+// The accumulator is not tracked by the A/B instruction scheduler.
+void labelLoadOpsForTritonDot(scf::ForOp forOp) {
+  mlir::MLIRContext *ctx = forOp->getContext();
+  triton::DotOp dotOp = nullptr;
+  size_t dotCounter = 0;
+  forOp->walk([&](triton::DotOp op) {
+    dotOp = op;
+    ++dotCounter;
+  });
+  if (dotCounter == 1) {
+    auto labelOperandLoad = [&](unsigned opIdx, Value dotOperand) {
+      if (auto loadOp = passPrevUnaryOps<triton::LoadOp>(dotOperand)) {
+        auto opIdxAttr = triton::amdgpu::OpIdxAttr::get(ctx, opIdx);
+        loadOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(), opIdxAttr);
+      }
+    };
+    labelOperandLoad(0, dotOp.getA());
+    labelOperandLoad(1, dotOp.getB());
+  }
+}
+
 struct PipelinePass : public TritonAMDGPUStreamPipelineV2Base<PipelinePass> {
   PipelinePass() = default;
   PipelinePass(int32_t numStages) { this->numStages = numStages; }
@@ -692,6 +744,7 @@ struct PipelinePass : public TritonAMDGPUStreamPipelineV2Base<PipelinePass> {
   void runOnOperation() override {
     SmallVector<scf::ForOp> loops;
     getOperation()->walk([&](scf::ForOp forOp) {
+      labelLoadOpsForTritonDot(forOp);
       // Bail out for loops with num_stage <= 1.
       if (getNumStagesOrDefault(forOp) > 1)
         loops.push_back(forOp);

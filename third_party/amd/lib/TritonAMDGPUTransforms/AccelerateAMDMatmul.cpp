@@ -513,58 +513,9 @@ static void decomposeMixedModeDotOp(ModuleOp mod) {
               ? AElType
               : BElType;
     } else {
-      // FMA case.
-      Type AElType = dotOp.getA().getType().getElementType();
-      Type DElType = D.getType().getElementType();
-
-      // Convert int operands to FP32 to apply FMA case
-      // Do it here instead of introducing new pattern because the pass is more
-      // about MMA dots.
-      // TODO: Introduce new pass for FMA dots legalization.
-      if (AElType.isIntOrIndex()) {
-        assert(dotOp.getB().getType().getElementType().isIntOrIndex() &&
-               dotOp.getC().getType().getElementType().isIntOrIndex() &&
-               DElType.isIntOrIndex());
-        auto convertTensorIToFP = [&](Value v) -> Value {
-          RankedTensorType vTy = cast<RankedTensorType>(v.getType());
-          Type dstType = vTy.cloneWith(std::nullopt, builder.getF32Type());
-          Type srcElType = vTy.getElementType();
-          return !srcElType.isUnsignedInteger()
-                     ? builder
-                           .create<arith::SIToFPOp>(dotOp.getLoc(), dstType, v)
-                           .getResult()
-                     : builder
-                           .create<arith::UIToFPOp>(dotOp.getLoc(), dstType, v)
-                           .getResult();
-        };
-        auto convertTensorFPToI = [&](Type dstElType, Value v) -> Value {
-          RankedTensorType vTy = cast<RankedTensorType>(v.getType());
-          Type dstType = vTy.cloneWith(std::nullopt, dstElType);
-          return !dstElType.isUnsignedInteger()
-                     ? builder
-                           .create<arith::FPToSIOp>(dotOp.getLoc(), dstType, v)
-                           .getResult()
-                     : builder
-                           .create<arith::FPToUIOp>(dotOp.getLoc(), dstType, v)
-                           .getResult();
-        };
-
-        auto newAOperand = convertTensorIToFP(dotOp.getA());
-        auto newBOperand = convertTensorIToFP(dotOp.getB());
-        auto newCOperand = convertTensorIToFP(dotOp.getC());
-        auto newDot = builder.create<tt::DotOp>(
-            dotOp.getLoc(), newCOperand.getType(), newAOperand, newBOperand,
-            newCOperand, dotOp.getInputPrecision(),
-            dotOp.getMaxNumImpreciseAcc());
-        auto newD = convertTensorFPToI(DElType, newDot.getResult());
-        D.replaceAllUsesWith(newD);
-        dotOp.erase();
-        return;
-      }
-
-      if (AElType == DElType)
-        return;
-      promoteType = DElType;
+      // FMA dots are legalized by AccelerateBlocked below. In particular,
+      // preserving i8 x i8 -> i32 here is required for AMD vector-dot.
+      return;
     }
     Location loc = dotOp.getLoc();
     Value promotedA = promoteOperand(builder, loc, dotOp.getA(), promoteType);
@@ -664,6 +615,114 @@ public:
     return success();
   }
 };
+class AccelerateBlocked : public OpRewritePattern<tt::DotOp> {
+  StringRef arch;
+
+public:
+  AccelerateBlocked(MLIRContext *context, StringRef arch,
+                    PatternBenefit benefit = 1)
+      : OpRewritePattern(context, benefit), arch(arch) {}
+
+  bool isFloat(Type type) const {
+    return type.isIntOrFloat() && !type.isIntOrIndex();
+  }
+
+  Value castToElementType(PatternRewriter &rewriter, Value value,
+                          Type elementType) const {
+    Location loc = value.getLoc();
+    auto sourceType = cast<RankedTensorType>(value.getType());
+    auto destinationType = sourceType.cloneWith(std::nullopt, elementType);
+    if (sourceType == destinationType)
+      return value;
+
+    Type sourceElementType = sourceType.getElementType();
+    if (isFloat(sourceElementType) && isFloat(elementType)) {
+      auto roundingMode = RoundingModeAttr::get(rewriter.getContext(),
+                                                RoundingMode::RTNE);
+      return rewriter.create<FpToFpOp>(loc, destinationType, value,
+                                       roundingMode);
+    }
+    if (!isFloat(sourceElementType) && isFloat(elementType)) {
+      if (sourceElementType.isUnsignedInteger())
+        return rewriter.create<arith::UIToFPOp>(loc, destinationType, value);
+      return rewriter.create<arith::SIToFPOp>(loc, destinationType, value);
+    }
+    if (isFloat(sourceElementType) && !isFloat(elementType)) {
+      if (elementType.isUnsignedInteger())
+        return rewriter.create<arith::FPToUIOp>(loc, destinationType, value);
+      return rewriter.create<arith::FPToSIOp>(loc, destinationType, value);
+    }
+    llvm_unreachable("unexpected integer-to-integer FMA cast");
+  }
+
+  struct DotElementTypes {
+    Type a, b, c, d;
+  };
+
+  bool isLegalFMAForm(tt::DotOp dotOp, const DotElementTypes &types) const {
+    if (AMD::supportsVDot(arch)) {
+      auto aType = cast<RankedTensorType>(dotOp.getA().getType());
+      unsigned k = aType.getShape().back();
+      if (types.a.isF16() && types.b.isF16() && types.c.isF32() &&
+          types.d.isF32() && k % 2 == 0)
+        return true;
+      if (types.a.isInteger(8) && !types.a.isUnsignedInteger() &&
+          types.b.isInteger(8) && !types.b.isUnsignedInteger() &&
+          types.c.isInteger(32) && types.d.isInteger(32) && k % 4 == 0)
+        return true;
+    }
+
+    for (Type type : {types.a, types.b, types.c, types.d}) {
+      if (type != types.a || (!type.isF16() && !type.isF32()))
+        return false;
+    }
+    return true;
+  }
+
+  LogicalResult legalizeFMA(tt::DotOp dotOp, PatternRewriter &rewriter,
+                            const DotElementTypes &types) const {
+    SmallVector<Type> operandTypes{types.a, types.b, types.c, types.d};
+    unsigned maxBitWidth = 8;
+    for (Type type : operandTypes)
+      maxBitWidth = std::max(maxBitWidth, type.getIntOrFloatBitWidth());
+    assert(maxBitWidth <= 32);
+    Type commonType = maxBitWidth <= 16 ? rewriter.getF16Type()
+                                        : rewriter.getF32Type();
+    if (commonType.isF16()) {
+      for (Type type : operandTypes) {
+        if ((type.isInteger() && type.getIntOrFloatBitWidth() > 8) ||
+            type.isBF16()) {
+          commonType = rewriter.getF32Type();
+          break;
+        }
+      }
+    }
+
+    Value newA = castToElementType(rewriter, dotOp.getA(), commonType);
+    Value newB = castToElementType(rewriter, dotOp.getB(), commonType);
+    Value newC = castToElementType(rewriter, dotOp.getC(), commonType);
+    auto newDot = rewriter.create<tt::DotOp>(
+        dotOp.getLoc(), newC.getType(), newA, newB, newC,
+        dotOp.getInputPrecision(), dotOp.getMaxNumImpreciseAcc());
+    Value newD = castToElementType(rewriter, newDot, types.d);
+    rewriter.replaceOp(dotOp, newD);
+    return success();
+  }
+
+  LogicalResult matchAndRewrite(tt::DotOp dotOp,
+                                PatternRewriter &rewriter) const override {
+    if (!isa<ttg::BlockedEncodingAttr>(dotOp.getD().getType().getEncoding()))
+      return failure();
+
+    DotElementTypes types{dotOp.getA().getType().getElementType(),
+                          dotOp.getB().getType().getElementType(),
+                          dotOp.getC().getType().getElementType(),
+                          dotOp.getD().getType().getElementType()};
+    if (isLegalFMAForm(dotOp, types))
+      return failure();
+    return legalizeFMA(dotOp, rewriter, types);
+  }
+};
 } // namespace
 
 #define GEN_PASS_CLASSES
@@ -700,6 +759,10 @@ public:
     default:
       break;
     }
+    // Keep matrix-core patterns ahead of FMA, while allowing every AMD target
+    // to use vector-dot where it is legal and scalar FMA otherwise.
+    patterns.add<AccelerateBlocked>(context, archGenerationName,
+                                    /*benefit=*/1);
     if (applyPatternsAndFoldGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
     }

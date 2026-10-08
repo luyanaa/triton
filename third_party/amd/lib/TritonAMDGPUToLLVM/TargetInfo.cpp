@@ -4,6 +4,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "llvm/ADT/STLExtras.h"
 
 namespace mlir::triton::AMD {
 
@@ -392,6 +393,30 @@ bool TargetInfo::supportVectorizedAtomics() const {
   // Note: not currently tested or used, but AMD generally supports vectorized
   // atomics.
   return true;
+}
+
+bool TargetInfo::supportsBufferLoadToLocalBitWidth(int bitWidth) const {
+  switch (getISAFamily()) {
+  case ISAFamily::GCN5:
+  case ISAFamily::VEGA20:
+  case ISAFamily::CDNA1:
+  case ISAFamily::CDNA2:
+  case ISAFamily::CDNA3:
+    return llvm::is_contained({8, 16, 32}, bitWidth);
+  default:
+    return false;
+  }
+}
+
+bool TargetInfo::supportsGlobalLoadLDSBitWidth(int bitWidth) const {
+  switch (getISAFamily()) {
+  case ISAFamily::CDNA1:
+  case ISAFamily::CDNA2:
+  case ISAFamily::CDNA3:
+    return llvm::is_contained({8, 16, 32}, bitWidth);
+  default:
+    return false;
+  }
 }
 
 

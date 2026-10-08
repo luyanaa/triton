@@ -122,3 +122,148 @@ module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 :
     tt.return %10 : tensor<1024xf32, #blocked>
   }
 }
+
+// -----
+
+#blocked = #triton_gpu.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#shared = #triton_gpu.shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.target" = "hip:gfx940", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32} {
+  // CHECK-LABEL: async_copy_target_attr
+  // CHECK: amdgpu.buffer_load_to_local %arg0[%[[OFF:.*]]] mask = %[[MASK:.*]] other = %[[OTHER:.*]] into %[[DST:.*]]
+  // CHECK: triton_gpu.async_wait
+  tt.func @async_copy_target_attr(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {
+    %offset = tt.make_range {end = 32 : i32, start = 0 : i32} : tensor<32xi32, #blocked>
+    %ptrs = tt.splat %arg0 : !tt.ptr<f32> -> tensor<32x!tt.ptr<f32>, #blocked>
+    %src = tt.addptr %ptrs, %offset : tensor<32x!tt.ptr<f32>, #blocked>, tensor<32xi32, #blocked>
+    %mask = arith.constant dense<false> : tensor<32xi1, #blocked>
+    %other = arith.constant dense<0.000000e+00> : tensor<32xf32, #blocked>
+    %dst = triton_gpu.local_alloc : () -> !tt.memdesc<32xf32, #shared, #triton_gpu.shared_memory, mutable>
+    %token = triton_gpu.async_copy_global_to_local %src, %dst mask %mask other %other : tensor<32x!tt.ptr<f32>, #blocked> -> !tt.memdesc<32xf32, #shared, #triton_gpu.shared_memory, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #triton_gpu.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#shared = #triton_gpu.shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.target" = "hip:gfx1030", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32} {
+  // CHECK-LABEL: async_copy_rdna_excluded
+  // CHECK: triton_gpu.async_copy_global_to_local %[[SRC:.*]], %[[DST:.*]] mask %[[MASK:.*]] other %[[OTHER:.*]]
+  tt.func @async_copy_rdna_excluded(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {
+    %offset = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked>
+    %ptrs = tt.splat %arg0 : !tt.ptr<f32> -> tensor<128x!tt.ptr<f32>, #blocked>
+    %src = tt.addptr %ptrs, %offset : tensor<128x!tt.ptr<f32>, #blocked>, tensor<128xi32, #blocked>
+    %mask = arith.constant dense<false> : tensor<128xi1, #blocked>
+    %other = arith.constant dense<0.000000e+00> : tensor<128xf32, #blocked>
+    %dst = triton_gpu.local_alloc : () -> !tt.memdesc<128xf32, #shared, #triton_gpu.shared_memory, mutable>
+    %token = triton_gpu.async_copy_global_to_local %src, %dst mask %mask other %other : tensor<128x!tt.ptr<f32>, #blocked> -> !tt.memdesc<128xf32, #shared, #triton_gpu.shared_memory, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #triton_gpu.blocked<{sizePerThread = [2], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#shared = #triton_gpu.shared<{vec = 2, perPhase = 1, maxPhase = 1, order = [0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.target" = "hip:gfx940", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32} {
+  // CHECK-LABEL: stream_load_to_local
+  // CHECK: amdgpu.buffer_load_to_local {{.*}} {OpIdx = #amdgpu.OpIdx<0>}
+  // CHECK: triton_gpu.async_wait
+  tt.func @stream_load_to_local(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}) {
+    %offset = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked>
+    %ptrs = tt.splat %arg0 : !tt.ptr<f16> -> tensor<128x!tt.ptr<f16>, #blocked>
+    %src = tt.addptr %ptrs, %offset : tensor<128x!tt.ptr<f16>, #blocked>, tensor<128xi32, #blocked>
+    %dst = triton_gpu.local_alloc : () -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    %loaded = tt.load %src {OpIdx = #amdgpu.OpIdx<0>} : tensor<128x!tt.ptr<f16>, #blocked>
+    triton_gpu.local_store %loaded, %dst : tensor<128xf16, #blocked> -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #triton_gpu.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#shared = #triton_gpu.shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.target" = "hip:gfx940", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32} {
+  // CHECK-LABEL: async_copy_preserves_eviction
+  // CHECK: triton_gpu.async_copy_global_to_local
+  // CHECK-NOT: amdgpu.buffer_load_to_local
+  tt.func @async_copy_preserves_eviction(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}) {
+    %offset = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked>
+    %ptrs = tt.splat %arg0 : !tt.ptr<f32> -> tensor<128x!tt.ptr<f32>, #blocked>
+    %src = tt.addptr %ptrs, %offset : tensor<128x!tt.ptr<f32>, #blocked>, tensor<128xi32, #blocked>
+    %dst = triton_gpu.local_alloc : () -> !tt.memdesc<128xf32, #shared, #triton_gpu.shared_memory, mutable>
+    %token = triton_gpu.async_copy_global_to_local %src, %dst evictionPolicy = evict_first : tensor<128x!tt.ptr<f32>, #blocked> -> !tt.memdesc<128xf32, #shared, #triton_gpu.shared_memory, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #triton_gpu.blocked<{sizePerThread = [2], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#shared = #triton_gpu.shared<{vec = 2, perPhase = 1, maxPhase = 1, order = [0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.target" = "hip:gfx940", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32} {
+  // CHECK-LABEL: stream_load_preserves_volatile
+  // CHECK: tt.load {{.*}}isVolatile = true
+  // CHECK: triton_gpu.local_store
+  // CHECK-NOT: amdgpu.buffer_load_to_local
+  tt.func @stream_load_preserves_volatile(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}) {
+    %offset = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked>
+    %ptrs = tt.splat %arg0 : !tt.ptr<f16> -> tensor<128x!tt.ptr<f16>, #blocked>
+    %src = tt.addptr %ptrs, %offset : tensor<128x!tt.ptr<f16>, #blocked>, tensor<128xi32, #blocked>
+    %dst = triton_gpu.local_alloc : () -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    %loaded = tt.load %src {isVolatile = true} : tensor<128x!tt.ptr<f16>, #blocked>
+    triton_gpu.local_store %loaded, %dst : tensor<128xf16, #blocked> -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #triton_gpu.blocked<{sizePerThread = [2], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#shared = #triton_gpu.shared<{vec = 2, perPhase = 1, maxPhase = 1, order = [0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.target" = "hip:gfx900", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32} {
+  // CHECK-LABEL: stream_load_to_local_gcn5
+  // CHECK: amdgpu.buffer_load_to_local
+  // CHECK: triton_gpu.async_wait
+  tt.func @stream_load_to_local_gcn5(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}) {
+    %offset = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked>
+    %ptrs = tt.splat %arg0 : !tt.ptr<f16> -> tensor<128x!tt.ptr<f16>, #blocked>
+    %src = tt.addptr %ptrs, %offset : tensor<128x!tt.ptr<f16>, #blocked>, tensor<128xi32, #blocked>
+    %dst = triton_gpu.local_alloc : () -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    %loaded = tt.load %src : tensor<128x!tt.ptr<f16>, #blocked>
+    triton_gpu.local_store %loaded, %dst : tensor<128xf16, #blocked> -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    tt.return
+  }
+  // CHECK-LABEL: async_copy_stays_global_load_lds_only
+  // CHECK: triton_gpu.async_copy_global_to_local
+  // CHECK-NOT: amdgpu.buffer_load_to_local
+  tt.func @async_copy_stays_global_load_lds_only(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}) {
+    %offset = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked>
+    %ptrs = tt.splat %arg0 : !tt.ptr<f16> -> tensor<128x!tt.ptr<f16>, #blocked>
+    %src = tt.addptr %ptrs, %offset : tensor<128x!tt.ptr<f16>, #blocked>, tensor<128xi32, #blocked>
+    %dst = triton_gpu.local_alloc : () -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    %token = triton_gpu.async_copy_global_to_local %src, %dst : tensor<128x!tt.ptr<f16>, #blocked> -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked = #triton_gpu.blocked<{sizePerThread = [2], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+#shared = #triton_gpu.shared<{vec = 2, perPhase = 1, maxPhase = 1, order = [0], hasLeadingOffset = false}>
+module attributes {"triton_gpu.target" = "hip:gfx906", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32} {
+  // CHECK-LABEL: stream_load_to_local_vega20
+  // CHECK: amdgpu.buffer_load_to_local
+  // CHECK: triton_gpu.async_wait
+  tt.func @stream_load_to_local_vega20(%arg0: !tt.ptr<f16> {tt.divisibility = 16 : i32}) {
+    %offset = tt.make_range {end = 128 : i32, start = 0 : i32} : tensor<128xi32, #blocked>
+    %ptrs = tt.splat %arg0 : !tt.ptr<f16> -> tensor<128x!tt.ptr<f16>, #blocked>
+    %src = tt.addptr %ptrs, %offset : tensor<128x!tt.ptr<f16>, #blocked>, tensor<128xi32, #blocked>
+    %dst = triton_gpu.local_alloc : () -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    %loaded = tt.load %src : tensor<128x!tt.ptr<f16>, #blocked>
+    triton_gpu.local_store %loaded, %dst : tensor<128xf16, #blocked> -> !tt.memdesc<128xf16, #shared, #triton_gpu.shared_memory, mutable>
+    tt.return
+  }
+}

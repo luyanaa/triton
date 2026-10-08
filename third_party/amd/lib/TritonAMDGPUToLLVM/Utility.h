@@ -9,6 +9,10 @@
 #include "triton/Analysis/Utility.h"
 #include "triton/Conversion/MLIRTypes.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+namespace mlir::triton::AMD {
+class TargetInfo;
+}
+
 namespace mlir::LLVM::AMD {
 
 const char predicatedLoad[] = "__predicated_load";
@@ -42,6 +46,17 @@ Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
              Value pred, int64_t alignmentBytes = 0,
              triton::CacheModifier cm = triton::CacheModifier::NONE);
+
+// Return the ROCDL cache-control word used by direct buffer/global LDS loads.
+int32_t getCtrlBitsForCacheModifierOnTarget(
+    triton::CacheModifier cm, bool isBufferLoad,
+    const triton::AMD::TargetInfo &targetInfo);
+
+// Return true when the source-to-shared layout writes contiguous LDS chunks
+// for the requested vector width.
+bool canCoalesceWriteIntoSharedMemory(
+    RankedTensorType srcTy, triton::gpu::MemDescType dstTy,
+    unsigned vectorSize);
 } // namespace mlir::LLVM::AMD
 
 #endif

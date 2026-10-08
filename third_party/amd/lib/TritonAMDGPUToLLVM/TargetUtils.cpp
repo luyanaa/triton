@@ -41,5 +41,24 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
   return ISAFamily::Unknown;
 }
 
+bool supportsVDot(llvm::StringRef arch) {
+  // gfx1011/12/13 support vector-dot instructions; gfx1010 does not.
+  if (arch.starts_with("gfx1011") || arch.starts_with("gfx1012") ||
+      arch.starts_with("gfx1013"))
+    return true;
+
+  switch (deduceISAFamily(arch)) {
+  case ISAFamily::VEGA20:
+  case ISAFamily::CDNA1:
+  case ISAFamily::CDNA2:
+  case ISAFamily::CDNA3:
+  case ISAFamily::RDNA2:
+  case ISAFamily::RDNA3:
+    return true;
+  default:
+    return false;
+  }
+}
+
 
 } // namespace mlir::triton::AMD

@@ -1,6 +1,7 @@
 #include <array>
+#include "llvm/ADT/STLExtras.h"
 #include "Utility.h"
-#include "TritonAMDGPUToLLVM/TargetUtils.h"
+#include "TargetInfo.h"
 #include "PatternTritonGPUOpToLLVM.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
@@ -359,6 +360,59 @@ void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
   LLVM::LLVMFuncOp funcOp =
       appendOrGetExternFuncOp(rewriter, parent, funcName, funcType);
   LLVM::createLLVMCallOp(rewriter, loc, funcOp, ValueRange({ptr, val, pred}));
+}
+
+static int32_t getCtrlBitsForCacheModifierOnCDNA(
+    triton::CacheModifier cm, bool isBufferLoad) {
+  const int sc0Bit = 0b1;
+  const int ntBit = 0b10;
+  const int sc1Bit = 0b1000;
+  switch (cm) {
+  case triton::CacheModifier::CG:
+    return isBufferLoad ? sc0Bit | ntBit : 0;
+  case triton::CacheModifier::CS:
+    return sc0Bit | ntBit;
+  case triton::CacheModifier::CV:
+    return sc0Bit | sc1Bit;
+  case triton::CacheModifier::WT:
+    return sc1Bit;
+  default:
+    return 0;
+  }
+}
+
+int32_t getCtrlBitsForCacheModifierOnTarget(
+    triton::CacheModifier cm, bool isBufferLoad,
+    const triton::AMD::TargetInfo &targetInfo) {
+  using triton::AMD::ISAFamily;
+  switch (targetInfo.getISAFamily()) {
+  case ISAFamily::CDNA1:
+  case ISAFamily::CDNA2:
+  case ISAFamily::CDNA3:
+    return getCtrlBitsForCacheModifierOnCDNA(cm, isBufferLoad);
+  default:
+    return 0;
+  }
+}
+
+bool canCoalesceWriteIntoSharedMemory(RankedTensorType srcTy,
+                                      triton::gpu::MemDescType dstTy,
+                                      unsigned vectorSize) {
+  auto shape = srcTy.getShape();
+  auto srcLayout = triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
+  auto sharedLayout =
+      triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
+  if (!srcLayout || !sharedLayout)
+    return false;
+  LinearLayout srcToSharedLayout =
+      srcLayout->invertAndCompose(*sharedLayout);
+  StringAttr lane = StringAttr::get(srcTy.getContext(), "lane");
+  for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(lane))) {
+    auto basis = srcToSharedLayout.getBasis(lane, inLane)[0];
+    if (basis != vectorSize * (1u << inLane))
+      return false;
+  }
+  return true;
 }
 
 } // namespace mlir::LLVM::AMD

@@ -39,7 +39,7 @@ namespace mlir::LLVM::AMD {
 BufferEmitter::BufferEmitter(RewriterBase &rw, Location loc, TargetInfo ti)
     : rewriter(rw), loc(loc), targetInfo(ti) {}
 
-Value BufferEmitter::createResourceDescriptor(Value basePtr) {
+Value BufferEmitter::createResourceDescriptor(Value basePtr, Value blockStride) {
   // 1. Create the resource descriptor
   // bits 0-11: dst sel, ignored by these intrinsics
   // bits 12-14: data format (ignored, must be nonzero, 7=float)
@@ -65,6 +65,13 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr) {
     flags |= (oob << 28);
   }
   Value stride = int_val(16, 0);
+  if (blockStride && targetInfo.getISAFamily() == ISAFamily::CDNA3) {
+    Value stride16 = rewriter.create<LLVM::TruncOp>(loc, i16_ty, blockStride);
+    Value strideValue = rewriter.create<LLVM::AndOp>(
+        loc, stride16, int_val(16, 16383));
+    stride = rewriter.create<LLVM::OrOp>(loc, strideValue,
+                                         int_val(16, 1 << 14));
+  }
   Value flagsConst = int_val(32, flags);
   Type rsrcType = LLVM::LLVMPointerType::get(rewriter.getContext(), 8);
   Value numRecordsByte = int_val(32, std::numeric_limits<int>::max() - 1);
@@ -85,6 +92,19 @@ Value BufferEmitter::emitLoad(Type type, Value rsrcDesc, Value offset,
   if (!isZero(falseVal))
     data = select(pred, data, falseVal);
   return data;
+}
+
+void BufferEmitter::emitLoadToLds(Type type, Value byteWidth, Value rsrcDesc,
+                                  Value offset, Value dst, Value pred,
+                                  triton::CacheModifier cm) {
+  SmallVector<Value, 6> commonArgs;
+  fillCommonArgs(type, rsrcDesc, offset, pred, commonArgs, cm,
+                 /*isBufferLoad=*/true);
+  rewriter.create<ROCDL::RawPtrBufferLoadLdsOp>(
+      loc, TypeRange{},
+      ValueRange{commonArgs[0], dst, byteWidth, commonArgs[1],
+                 int_val(32, 0), commonArgs[2], commonArgs[3]},
+      ArrayRef<NamedAttribute>());
 }
 
 void BufferEmitter::emitStore(Value rsrcDesc, Value offset, Value data,
@@ -143,7 +163,9 @@ Type BufferEmitter::getBufferOpType(Type type) {
 
 void BufferEmitter::fillCommonArgs(Type type, Value rsrcDesc,
                                    Value vOffsetElems, Value pred,
-                                   SmallVector<Value> &args) {
+                                   SmallVector<Value> &args,
+                                   triton::CacheModifier cm,
+                                   bool isBufferLoad) {
 
   // 1. Create the (masked) offset
   Type elementType = getElementTypeOrSelf(type);
@@ -160,11 +182,9 @@ void BufferEmitter::fillCommonArgs(Type type, Value rsrcDesc,
   // 2. Set the sgprOffset to 0
   Value sgprOffset = int_val(32, 0);
 
-  // 3. Create the cache modifiers word
-  // bit 0: GLC = 0 (atomics drop value, less coherency)
-  // bits 1-2: SLC, DLC = 0 (similarly)
-  // bit 3: swizzled (0 for raw)
-  Value cacheModifiers = int_val(32, 0);
+  // 3. Create the cache modifiers word.
+  Value cacheModifiers = int_val(
+      32, getCtrlBitsForCacheModifierOnTarget(cm, isBufferLoad, targetInfo));
 
   // 5. Add the arguments
   args.push_back(rsrcDesc);

@@ -60,6 +60,13 @@ public:
 
   bool supportVectorizedAtomics() const override;
 
+  // Buffer direct-to-LDS supports GCN5, VEGA20, and CDNA1-3.
+  bool supportsBufferLoadToLocalBitWidth(int bitWidth) const;
+
+  // GlobalLoadLDS is restricted to CDNA1-3; this is intentionally narrower
+  // than the buffer direct-to-LDS capability above.
+  bool supportsGlobalLoadLDSBitWidth(int bitWidth) const;
+
 private:
   void printfImpl(Value formatStrStart, int formatStrByteCount, ValueRange args,
                   RewriterBase &rewriter, bool useStdErr) const;

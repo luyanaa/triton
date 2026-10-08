@@ -1,4 +1,5 @@
 #include "TritonAMDGPUToLLVM/Passes.h"
+#include "SchedInstructions.h"
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Pass/Pass.h"
@@ -10,6 +11,38 @@ namespace mlir::triton {
 #define GEN_PASS_DEF_INSERTINSTRUCTIONSCHEDHINTS
 #define GEN_PASS_DEF_LOWERINSTRUCTIONSCHEDHINTS
 #include "TritonAMDGPUToLLVM/Passes.h.inc"
+} // namespace mlir::triton
+
+namespace mlir::triton {
+template <typename LoadOpType>
+void setNumGeneratedGlobalLoads(LoadOpType op, size_t globalLoadsCount,
+                                Type type) {
+  MLIRContext *ctx = op->getContext();
+  auto counterAttr =
+      triton::amdgpu::InstCounterAttr::get(ctx, globalLoadsCount, type);
+
+  op->getBlock()->walk([&](triton::amdgpu::InstructionSchedHint schedHint) {
+    if (auto opIdxAttr = op->template getAttrOfType<triton::amdgpu::OpIdxAttr>(
+            triton::amdgpu::OpIdxAttr::getMnemonic())) {
+      const bool isBufferLoadOp =
+          std::is_same_v<LoadOpType, triton::amdgpu::BufferLoadOp> ||
+          std::is_same_v<LoadOpType,
+                         triton::amdgpu::BufferLoadToLocalOp>;
+      if (opIdxAttr.getValue() == 0) {
+        schedHint.setNumGlobalLoadsAAttr(counterAttr);
+        schedHint.setIsBufferLoadsAEnabled(isBufferLoadOp);
+      } else {
+        schedHint.setNumGlobalLoadsBAttr(counterAttr);
+        schedHint.setIsBufferLoadsBEnabled(isBufferLoadOp);
+      }
+    }
+  });
+}
+template void setNumGeneratedGlobalLoads(
+    triton::amdgpu::BufferLoadToLocalOp op, size_t globalLoadsCount, Type type);
+template void setNumGeneratedGlobalLoads(
+    triton::amdgpu::BufferLoadOp op, size_t globalLoadsCount, Type type);
+
 } // namespace mlir::triton
 
 using namespace mlir;
