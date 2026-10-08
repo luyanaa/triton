@@ -65,3 +65,49 @@ module attributes {"triton_gpu.target" = "hip:gfx1010", "triton_gpu.num-ctas" = 
     }) : (tensor<32xf32, #blocked32>) -> f32
     tt.return %0 : f32
 }
+
+// -----
+
+#blockedSubgroups = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [2, 32], warpsPerCTA = [1, 1], order = [1, 0]}>
+module attributes {"triton_gpu.target" = "hip:gfx942", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32, "triton_gpu.threads-per-warp" = 64 : i32} {
+  // GFX9-LABEL: reduce_add_two_32_lane_groups
+  // GFX9-NOT: readlane
+  // GFX9-NOT: with 322,
+  // GFX9-NOT: with 323,
+  // GFX9: rocdl.ds_swizzle
+  // GFX9-NOT: readlane
+  // GFX9-NOT: with 322,
+  // GFX9-NOT: with 323,
+  // GFX9: llvm.return
+  tt.func @reduce_add_two_32_lane_groups(%arg0: tensor<2x32xf32, #blockedSubgroups>) -> tensor<2xf32, #triton_gpu.slice<{dim = 1, parent = #blockedSubgroups}>> {
+    %0 = "tt.reduce"(%arg0) <{axis = 1 : i32}> ({
+    ^bb0(%lhs: f32, %rhs: f32):
+      %sum = arith.addf %lhs, %rhs : f32
+      tt.reduce.return %sum : f32
+    }) : (tensor<2x32xf32, #blockedSubgroups>) -> tensor<2xf32, #triton_gpu.slice<{dim = 1, parent = #blockedSubgroups}>>
+    tt.return %0 : tensor<2xf32, #triton_gpu.slice<{dim = 1, parent = #blockedSubgroups}>>
+  }
+}
+
+// -----
+
+#blockedInterleave2 = #triton_gpu.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 2], warpsPerCTA = [1, 1], order = [1, 0]}>
+module attributes {"triton_gpu.target" = "hip:gfx942", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32, "triton_gpu.threads-per-warp" = 64 : i32} {
+  // GFX9-LABEL: reduce_add_interleave_2_32_lanes
+  // GFX9-NOT: readlane
+  // GFX9-NOT: with 322,
+  // GFX9-NOT: with 323,
+  // GFX9: rocdl.ds_swizzle
+  // GFX9-NOT: readlane
+  // GFX9-NOT: with 322,
+  // GFX9-NOT: with 323,
+  // GFX9: llvm.return
+  tt.func @reduce_add_interleave_2_32_lanes(%arg0: tensor<32x2xf32, #blockedInterleave2>) -> tensor<2xf32, #triton_gpu.slice<{dim = 0, parent = #blockedInterleave2}>> {
+    %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
+    ^bb0(%lhs: f32, %rhs: f32):
+      %sum = arith.addf %lhs, %rhs : f32
+      tt.reduce.return %sum : f32
+    }) : (tensor<32x2xf32, #blockedInterleave2>) -> tensor<2xf32, #triton_gpu.slice<{dim = 0, parent = #blockedInterleave2}>>
+    tt.return %0 : tensor<2xf32, #triton_gpu.slice<{dim = 0, parent = #blockedInterleave2}>>
+  }
+}

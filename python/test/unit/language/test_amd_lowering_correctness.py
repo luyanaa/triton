@@ -35,6 +35,53 @@ def test_amd_reduction_boundary_identity(use_max, sign, expected, device):
 
 
 @triton.jit
+def _reduce_two_32_lane_groups(X, Y):
+    rows = tl.arange(0, 2)
+    columns = tl.arange(0, 32)
+    offsets = rows[:, None] * 32 + columns[None, :]
+    values = tl.load(X + offsets)
+    sums = tl.sum(values, axis=1)
+    tl.store(Y + rows, sums)
+
+
+@triton.jit
+def _reduce_interleaved_32_lanes(X, Y):
+    rows = tl.arange(0, 32)
+    columns = tl.arange(0, 2)
+    offsets = rows[:, None] * 2 + columns[None, :]
+    values = tl.load(X + offsets)
+    sums = tl.sum(values, axis=0)
+    tl.store(Y + columns, sums)
+
+
+@pytest.mark.parametrize("layout_case", ["two_lane_groups", "interleave_2"])
+def test_amd_wave64_partial_warp_sum(layout_case, device):
+    if not is_hip():
+        pytest.skip("AMDGPU reduction regression")
+
+    target = triton.runtime.driver.active.get_current_target()
+    if target.warp_size != 64:
+        pytest.skip(f"requires wave64, got wave{target.warp_size}")
+
+    if layout_case == "two_lane_groups":
+        values = torch.cat(
+            (torch.ones((1, 32)), torch.full((1, 32), 2.0)), dim=0
+        ).to(device=device)
+        kernel = _reduce_two_32_lane_groups
+    else:
+        values = torch.stack(
+            (torch.ones((32,)), torch.full((32,), 2.0)), dim=1
+        ).to(device=device)
+        kernel = _reduce_interleaved_32_lanes
+
+    result = torch.empty((2,), device=device, dtype=torch.float32)
+    kernel[(1,)](values, result, num_warps=1)
+    torch.testing.assert_close(
+        result, torch.tensor([32.0, 64.0], device=device), rtol=0, atol=0
+    )
+
+
+@triton.jit
 def _atomic_add_masked_pairs(
     Output,
     Values,
