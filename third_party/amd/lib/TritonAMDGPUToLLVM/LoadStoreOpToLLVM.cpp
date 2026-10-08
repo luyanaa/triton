@@ -998,22 +998,12 @@ struct AtomicRMWOpConversion
     Type valueElemTy =
         tensorTy ? getTypeConverter()->convertType(tensorTy.getElementType())
                  : opResult.getType();
-    const size_t valueElemNbits = valueElemTy.getIntOrFloatBitWidth();
     auto elemsPerThread = getTotalElemsPerThread(val.getType());
-    // vec = 1, numElements = 1 for scalar
-    auto vec = getVectorSize(ptr);
+    // Masks and hardware support are per element. Keep atomics scalar until
+    // every lane in a packed operation has been proven safe.
     int numElems = 1;
-    // tensor
-    if (tensorTy) {
-      auto valTy = cast<RankedTensorType>(val.getType());
-      Type elTy = valTy.getElementType();
-      vec = std::min<unsigned>(vec, llvm::isa<FloatType>(elTy) &&
-                                            elTy.getIntOrFloatBitWidth() == 16
-                                        ? 2
-                                        : 1);
-      // mask
+    if (tensorTy)
       numElems = tensorTy.getNumElements();
-    }
     Value mask = int_val(1, 1);
     auto tid = tid_val();
     mask = and_(mask,
@@ -1022,24 +1012,15 @@ struct AtomicRMWOpConversion
     auto memOrdering = op.getSem();
     auto atomicMemOrdering = getMemoryOrdering(memOrdering);
 
-    auto vecTy = vec_ty(valueElemTy, vec);
-    auto retType = vec == 1 ? valueElemTy : vecTy;
+    auto retType = valueElemTy;
     SmallVector<Value> resultVals(elemsPerThread);
-    for (size_t i = 0; i < elemsPerThread; i += vec) {
+    for (size_t i = 0; i < elemsPerThread; ++i) {
       Value rmwPtr = ptrElements[i];
       // TODO: in case llMask is zero we can create only one branch for all
       // elemsPerThread.
       Value rmwMask = llMask ? and_(mask, maskElements[i]) : mask;
 
-      Value operand;
-      if (vec == 1) {
-        operand = valElements[i];
-      } else {
-        operand = undef(vecTy);
-        for (size_t ii = 0; ii < vec; ++ii)
-          operand =
-              insert_element(vecTy, operand, valElements[i + ii], i32_val(ii));
-      }
+      Value operand = valElements[i];
 
       Value undefVal = undef(retType);
       // Build blocks to bypass the atomic instruction for ~rmwMask.
@@ -1074,11 +1055,7 @@ struct AtomicRMWOpConversion
       rewriter.setInsertionPointToStart(endBlock);
       Value retVal = endBlock->getArgument(0);
       if (tensorTy) {
-        for (int ii = 0; ii < vec; ++ii) {
-          resultVals[i + ii] =
-              vec == 1 ? retVal
-                       : extract_element(valueElemTy, retVal, i32_val(ii));
-        }
+        resultVals[i] = retVal;
       } else {
         if (!atomicNeedsSharedMemory(op.getResult())) {
           rewriter.eraseOp(op);
