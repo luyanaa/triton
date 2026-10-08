@@ -45,11 +45,11 @@ public:
           triton::gpu::getCTALayout(transTy.getEncoding()),
           transTy.getElementType());
       auto sharedMemorySpace = SharedMemorySpaceAttr::get(getContext());
-      auto sharedTy = MemDescType::get(
-          transTy.getShape(), transTy.getElementType(), sharedEnc,
-          sharedMemorySpace);
-      auto alloc = rewriter.create<LocalAllocOp>(
-          trans.getLoc(), sharedTy, trans.getResult());
+      auto sharedTy =
+          MemDescType::get(transTy.getShape(), transTy.getElementType(),
+                           sharedEnc, sharedMemorySpace);
+      auto alloc = rewriter.create<LocalAllocOp>(trans.getLoc(), sharedTy,
+                                                 trans.getResult());
       auto load =
           rewriter.create<LocalLoadOp>(cvtOp.getLoc(), sharedLoadTy, alloc);
       // Replace only the conversion; `trans` may have other tensor users.

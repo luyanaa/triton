@@ -3,9 +3,9 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
@@ -346,8 +346,7 @@ static void sinkSecondLoad(ModuleOp m) {
     auto tileBShape = cast<RankedTensorType>(ldBOp.getType()).getShape();
     if (tileAShape.size() != 2 || tileBShape.size() != 2)
       return;
-    if (!(tileAShape[0] >= 128 && tileAShape[1] >= 64 &&
-          tileBShape[1] >= 128))
+    if (!(tileAShape[0] >= 128 && tileAShape[1] >= 64 && tileBShape[1] >= 128))
       return;
 
     Operation *firstUser = getFirstUseInSameBlock(ldBOp);

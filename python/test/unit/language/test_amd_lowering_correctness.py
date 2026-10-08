@@ -26,11 +26,9 @@ def test_amd_reduction_boundary_identity(use_max, sign, expected, device):
     if warp_size not in (32, 64):
         pytest.skip(f"unsupported AMD wave size: {warp_size}")
 
-    values = sign * torch.arange(
-        1, warp_size + 1, device=device, dtype=torch.float32
-    )
-    result = torch.empty((1,), device=device, dtype=torch.float32)
-    _reduce_extreme_kernel[(1,)](values, result, warp_size, use_max, num_warps=1)
+    values = sign * torch.arange(1, warp_size + 1, device=device, dtype=torch.float32)
+    result = torch.empty((1, ), device=device, dtype=torch.float32)
+    _reduce_extreme_kernel[(1, )](values, result, warp_size, use_max, num_warps=1)
     assert result.item() == expected
 
 
@@ -64,21 +62,15 @@ def test_amd_wave64_partial_warp_sum(layout_case, device):
         pytest.skip(f"requires wave64, got wave{target.warp_size}")
 
     if layout_case == "two_lane_groups":
-        values = torch.cat(
-            (torch.ones((1, 32)), torch.full((1, 32), 2.0)), dim=0
-        ).to(device=device)
+        values = torch.cat((torch.ones((1, 32)), torch.full((1, 32), 2.0)), dim=0).to(device=device)
         kernel = _reduce_two_32_lane_groups
     else:
-        values = torch.stack(
-            (torch.ones((32,)), torch.full((32,), 2.0)), dim=1
-        ).to(device=device)
+        values = torch.stack((torch.ones((32, )), torch.full((32, ), 2.0)), dim=1).to(device=device)
         kernel = _reduce_interleaved_32_lanes
 
-    result = torch.empty((2,), device=device, dtype=torch.float32)
-    kernel[(1,)](values, result, num_warps=1)
-    torch.testing.assert_close(
-        result, torch.tensor([32.0, 64.0], device=device), rtol=0, atol=0
-    )
+    result = torch.empty((2, ), device=device, dtype=torch.float32)
+    kernel[(1, )](values, result, num_warps=1)
+    torch.testing.assert_close(result, torch.tensor([32.0, 64.0], device=device), rtol=0, atol=0)
 
 
 @triton.jit
@@ -111,12 +103,10 @@ def test_amd_half_atomic_mask_pairs(dtype, mask_pair, base_offset, device):
     even, odd = mask_pair
     mask = torch.tensor(mask_pair, device=device, dtype=torch.bool).repeat(n // 2)
     values = torch.arange(1, n + 1, device=device, dtype=torch.float32).to(dtype)
-    output = torch.zeros((n + base_offset,), device=device, dtype=dtype)
+    output = torch.zeros((n + base_offset, ), device=device, dtype=dtype)
 
-    _atomic_add_masked_pairs[(1,)](
-        output, values, n, base_offset, even, odd, num_warps=4
-    )
+    _atomic_add_masked_pairs[(1, )](output, values, n, base_offset, even, odd, num_warps=4)
 
     expected = torch.zeros_like(output)
-    expected[base_offset : base_offset + n] = values * mask.to(dtype)
+    expected[base_offset:base_offset + n] = values * mask.to(dtype)
     torch.testing.assert_close(output, expected, rtol=0, atol=0)

@@ -66,10 +66,10 @@ void setNumGeneratedMMAs(DotOp op, size_t mmaCount, unsigned m, unsigned n,
   auto counterAttr =
       triton::amdgpu::InstCounterAttr::get(ctx, mmaCount, mmaType);
 
-  walkSchedHintsInSameLoop(
-      op, [&](triton::amdgpu::InstructionSchedHint schedHint) {
-        schedHint.setNumMMAsAttr(counterAttr);
-      });
+  walkSchedHintsInSameLoop(op,
+                           [&](triton::amdgpu::InstructionSchedHint schedHint) {
+                             schedHint.setNumMMAsAttr(counterAttr);
+                           });
 }
 
 template <typename LoadOpType>
@@ -81,12 +81,12 @@ void setNumGeneratedGlobalLoads(LoadOpType op, size_t globalLoadsCount,
 
   walkSchedHintsInSameLoop(
       op, [&](triton::amdgpu::InstructionSchedHint schedHint) {
-        if (auto opIdxAttr = op->template getAttrOfType<triton::amdgpu::OpIdxAttr>(
-                triton::amdgpu::OpIdxAttr::getMnemonic())) {
+        if (auto opIdxAttr =
+                op->template getAttrOfType<triton::amdgpu::OpIdxAttr>(
+                    triton::amdgpu::OpIdxAttr::getMnemonic())) {
           const bool isBufferLoadOp =
               std::is_same_v<LoadOpType, triton::amdgpu::BufferLoadOp> ||
-              std::is_same_v<LoadOpType,
-                             triton::amdgpu::BufferLoadToLocalOp>;
+              std::is_same_v<LoadOpType, triton::amdgpu::BufferLoadToLocalOp>;
           if (opIdxAttr.getValue() == 0) {
             schedHint.setNumGlobalLoadsAAttr(counterAttr);
             schedHint.setIsBufferLoadsAEnabled(isBufferLoadOp);
@@ -97,10 +97,10 @@ void setNumGeneratedGlobalLoads(LoadOpType op, size_t globalLoadsCount,
         }
       });
 }
-template void setNumGeneratedGlobalLoads(
-    triton::amdgpu::BufferLoadOp op, size_t globalLoadsCount, Type type);
-template void setNumGeneratedGlobalLoads(
-    triton::amdgpu::BufferLoadToLocalOp op, size_t globalLoadsCount, Type type);
+template void setNumGeneratedGlobalLoads(triton::amdgpu::BufferLoadOp op,
+                                         size_t globalLoadsCount, Type type);
+template void setNumGeneratedGlobalLoads(triton::amdgpu::BufferLoadToLocalOp op,
+                                         size_t globalLoadsCount, Type type);
 template void setNumGeneratedGlobalLoads(triton::LoadOp op,
                                          size_t globalLoadsCount, Type type);
 
@@ -171,7 +171,6 @@ bool isGfx942(ModuleOp moduleOp) {
   return arch == "gfx942";
 }
 
-
 // Create an intrinsic to control how different instruction kinds should
 // interleave for better ILP.
 void createSchedGroupBarrier(PatternRewriter &rewriter, Location loc,
@@ -219,8 +218,7 @@ struct InstructionSchedHintsRewriter
                                .Case("ck_v3", SchedulingType::CK_V3)
                                .Default(SchedulingType::UNKNOWN);
 
-    if (this->numStages < 2 &&
-        this->schedulingType == SchedulingType::CK_V3) {
+    if (this->numStages < 2 && this->schedulingType == SchedulingType::CK_V3) {
       this->schedulingType = SchedulingType::NONE;
       LDBG("ignoring CK_V3 instruction scheduling because num_stages < 2");
     }
@@ -263,7 +261,8 @@ struct InstructionSchedHintsRewriter
 
     const uint32_t numMfmaInst = schedHint.getNumMMAs().getValue();
 
-    auto mfmaType = dyn_cast<RankedTensorType>(schedHint.getNumMMAs().getType());
+    auto mfmaType =
+        dyn_cast<RankedTensorType>(schedHint.getNumMMAs().getType());
     auto dsReadsAType =
         dyn_cast<VectorType>(schedHint.getNumDsReadsA().getType());
     auto dsReadsBType =
@@ -300,8 +299,7 @@ struct InstructionSchedHintsRewriter
       return failure();
     }
     const auto numMfmaStage1 = numMfmaInst - numDsreadMfma;
-    const uint64_t numBufferLoads =
-        numBufferLoadInstA + numBufferLoadInstB;
+    const uint64_t numBufferLoads = numBufferLoadInstA + numBufferLoadInstB;
     if (numMfmaStage1 % numBufferLoads != 0 ||
         numDsWriteInstA % numBufferLoadInstA != 0 ||
         numDsWriteInstB % numBufferLoadInstB != 0) {
@@ -328,9 +326,9 @@ struct InstructionSchedHintsRewriter
                                 1, 0);
       }
       if (numMfmaPerIssue > numDswritePerIssueA)
-        createSchedGroupBarrier(
-            rewriter, loc, mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma,
-            numMfmaPerIssue - numDswritePerIssueA, 0);
+        createSchedGroupBarrier(rewriter, loc,
+                                mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma,
+                                numMfmaPerIssue - numDswritePerIssueA, 0);
     }
 
     for (size_t i = 0; i < numBufferLoadInstB; ++i) {
@@ -343,17 +341,17 @@ struct InstructionSchedHintsRewriter
                                 1, 0);
       }
       if (numMfmaPerIssue > numDswritePerIssueB)
-        createSchedGroupBarrier(
-            rewriter, loc, mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma,
-            numMfmaPerIssue - numDswritePerIssueB, 0);
+        createSchedGroupBarrier(rewriter, loc,
+                                mlir::amdgpu::sched_barrier_opt_enum::mfma_wmma,
+                                numMfmaPerIssue - numDswritePerIssueB, 0);
     }
 
     // stage 2
     uint32_t numDsReadsRemainingA = numDsReadInstA;
     for (size_t i = 0; i < numDsreadAMfma; ++i) {
-      const uint32_t numDsReadsInGroup =
-          numDsReadsRemainingA < dsReadAMfmaRate ? numDsReadsRemainingA
-                                                 : dsReadAMfmaRate;
+      const uint32_t numDsReadsInGroup = numDsReadsRemainingA < dsReadAMfmaRate
+                                             ? numDsReadsRemainingA
+                                             : dsReadAMfmaRate;
       createSchedGroupBarrier(rewriter, loc,
                               mlir::amdgpu::sched_barrier_opt_enum::ds_read,
                               numDsReadsInGroup, 0);
@@ -364,9 +362,9 @@ struct InstructionSchedHintsRewriter
 
     uint32_t numDsReadsRemainingB = numDsReadInstB;
     for (size_t i = 0; i < numDsreadBMfma; ++i) {
-      const uint32_t numDsReadsInGroup =
-          numDsReadsRemainingB < dsReadBMfmaRate ? numDsReadsRemainingB
-                                                 : dsReadBMfmaRate;
+      const uint32_t numDsReadsInGroup = numDsReadsRemainingB < dsReadBMfmaRate
+                                             ? numDsReadsRemainingB
+                                             : dsReadBMfmaRate;
       createSchedGroupBarrier(rewriter, loc,
                               mlir::amdgpu::sched_barrier_opt_enum::ds_read,
                               numDsReadsInGroup, 0);
@@ -505,17 +503,14 @@ struct TritonAMDGPUInsertInstructionSchedHints
         forOp->walk([&](Operation *op) {
           if (op->getParentOfType<scf::ForOp>() != forOp)
             return;
-          if (isa<triton::DotOp, triton::LoadOp,
-                  triton::amdgpu::BufferLoadOp,
+          if (isa<triton::DotOp, triton::LoadOp, triton::amdgpu::BufferLoadOp,
                   triton::amdgpu::BufferLoadToLocalOp, gpu::LocalLoadOp,
                   gpu::LocalStoreOp, gpu::AsyncCopyGlobalToLocalOp>(op))
-            op->setAttr(triton::amdgpu::InstructionSchedLoopIdAttrName,
-                        loopId);
+            op->setAttr(triton::amdgpu::InstructionSchedLoopIdAttrName, loopId);
         });
         rewriter.setInsertionPointAfter(dotOp);
-        auto schedHint =
-            rewriter.create<triton::amdgpu::InstructionSchedHint>(
-                dotOp->getLoc());
+        auto schedHint = rewriter.create<triton::amdgpu::InstructionSchedHint>(
+            dotOp->getLoc());
         schedHint->setAttr(triton::amdgpu::InstructionSchedLoopIdAttrName,
                            loopId);
       }

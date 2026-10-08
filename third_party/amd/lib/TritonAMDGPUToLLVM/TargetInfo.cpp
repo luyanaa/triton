@@ -179,10 +179,9 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
     return false;
 
   // This fast path uses row_bcast:15/31, which is unsupported on RDNA.
-  if (!llvm::is_contained(
-          {ISAFamily::GCN5, ISAFamily::VEGA20, ISAFamily::CDNA1,
-           ISAFamily::CDNA2, ISAFamily::CDNA3},
-          getISAFamily())) {
+  if (!llvm::is_contained({ISAFamily::GCN5, ISAFamily::VEGA20, ISAFamily::CDNA1,
+                           ISAFamily::CDNA2, ISAFamily::CDNA3},
+                          getISAFamily())) {
     return false;
   }
 
@@ -284,9 +283,9 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
 
     // Step 5: Broadcast lane 15 of rows 0 and 2 to rows 1 and 3.
     constexpr int bcast15RowMask = 0xa;
-    buf = createDppReduxOpWithBoundCtrl(
-        valType, buf, static_cast<uint32_t>(DppCtrl::BCAST15), bcast15RowMask,
-        allBanks);
+    buf = createDppReduxOpWithBoundCtrl(valType, buf,
+                                        static_cast<uint32_t>(DppCtrl::BCAST15),
+                                        bcast15RowMask, allBanks);
 
     // row_bcast:31
     buf = createDppReduxOpWithBoundCtrl(valType, buf,
@@ -453,7 +452,5 @@ bool TargetInfo::supportsGlobalLoadLDSBitWidth(int bitWidth) const {
     return false;
   }
 }
-
-
 
 } // namespace mlir::triton::AMD

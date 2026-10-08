@@ -13,8 +13,7 @@ struct OperandValueKey {
 
   bool operator==(const OperandValueKey &other) const {
     return bRepIdx == other.bRepIdx && nonKRepIdx == other.nonKRepIdx &&
-           bIdx == other.bIdx && nonKIdx == other.nonKIdx &&
-           kIdx == other.kIdx;
+           bIdx == other.bIdx && nonKIdx == other.nonKIdx && kIdx == other.kIdx;
   }
 };
 
@@ -32,10 +31,9 @@ namespace {
 using ValueTableFMA = std::unordered_map<OperandValueKey, Value>;
 
 ValueTableFMA getValueTableFromStructFMA(
-    Value value, ArrayRef<unsigned> perRepShape,
-    ArrayRef<unsigned> repetitions, unsigned kDim, unsigned nonKDim,
-    ConversionPatternRewriter &rewriter, Location loc,
-    ArrayRef<unsigned> inRepOrder) {
+    Value value, ArrayRef<unsigned> perRepShape, ArrayRef<unsigned> repetitions,
+    unsigned kDim, unsigned nonKDim, ConversionPatternRewriter &rewriter,
+    Location loc, ArrayRef<unsigned> inRepOrder) {
   ValueTableFMA result;
   auto elements = unpackLLElements(loc, value, rewriter);
   assert(perRepShape.size() == 3);
@@ -50,8 +48,7 @@ ValueTableFMA getValueTableFromStructFMA(
   // SharedToDotOperandFMA packs the full per-thread tile in D-layout order.
   // Decode combined coordinates so K and non-K repetitions may interleave.
   for (unsigned index = 0; index < elements.size(); ++index) {
-    auto spatialIndex =
-        LLVM::delinearize(index, perThreadShape, inRepOrder);
+    auto spatialIndex = LLVM::delinearize(index, perThreadShape, inRepOrder);
     SmallVector<unsigned> repSpatialIndex(3);
     SmallVector<unsigned> inRepSpatialIndex(3);
     for (unsigned dim = 0; dim < 3; ++dim) {
@@ -87,7 +84,8 @@ LogicalResult parametricConvertFMADot(DotOp op, DotOp::Adaptor adaptor,
   auto inRepOrder = expandMatrixOrderWithBatch(dLayout.getOrder());
   auto repOrder = expandMatrixOrderWithBatch(dLayout.getRepOrder());
 
-  SmallVector<Value> accumulators = unpackLLElements(loc, adaptor.getC(), rewriter);
+  SmallVector<Value> accumulators =
+      unpackLLElements(loc, adaptor.getC(), rewriter);
   Value llA = adaptor.getA();
   Value llB = adaptor.getB();
 
@@ -101,17 +99,17 @@ LogicalResult parametricConvertFMADot(DotOp op, DotOp::Adaptor adaptor,
   const unsigned kSize = aShapePerCTA[2];
   SmallVector<unsigned> repetitions(3);
   for (unsigned dim = 0; dim < 3; ++dim)
-    repetitions[dim] = ceil(dShapePerCTA[dim],
-                            static_cast<int64_t>(shapePerCTATile[dim]));
+    repetitions[dim] =
+        ceil(dShapePerCTA[dim], static_cast<int64_t>(shapePerCTATile[dim]));
 
   auto aValues = getValueTableFromStructFMA(
       llA, {sizePerThread[0], sizePerThread[1], kSize},
-      {repetitions[0], repetitions[1], 1}, /*kDim=*/2, /*nonKDim=*/1,
-      rewriter, loc, inRepOrder);
+      {repetitions[0], repetitions[1], 1}, /*kDim=*/2, /*nonKDim=*/1, rewriter,
+      loc, inRepOrder);
   auto bValues = getValueTableFromStructFMA(
       llB, {sizePerThread[0], kSize, sizePerThread[2]},
-      {repetitions[0], 1, repetitions[2]}, /*kDim=*/1, /*nonKDim=*/2,
-      rewriter, loc, inRepOrder);
+      {repetitions[0], 1, repetitions[2]}, /*kDim=*/1, /*nonKDim=*/2, rewriter,
+      loc, inRepOrder);
 
   for (unsigned bRep = 0; bRep < repetitions[0]; ++bRep)
     for (unsigned mRep = 0; mRep < repetitions[1]; ++mRep)
@@ -133,17 +131,15 @@ LogicalResult parametricConvertFMADot(DotOp op, DotOp::Adaptor adaptor,
               aVector.reserve(kSize);
               bVector.reserve(kSize);
               for (unsigned k = 0; k < kSize; ++k) {
-                aVector.push_back(aValues.at(
-                    {bRep, mRep, b, m, k}));
-                bVector.push_back(bValues.at(
-                    {bRep, nRep, b, n, k}));
+                aVector.push_back(aValues.at({bRep, mRep, b, m, k}));
+                bVector.push_back(bValues.at({bRep, nRep, b, n, k}));
               }
               accumulators[accumulatorIndex] = multiplier.multiplyVectors(
                   aVector, bVector, accumulators[accumulatorIndex]);
             }
 
-  Value result = packLLElements(loc, typeConverter, accumulators, rewriter,
-                                dTensorType);
+  Value result =
+      packLLElements(loc, typeConverter, accumulators, rewriter, dTensorType);
   rewriter.replaceOp(op, result);
   return success();
 }

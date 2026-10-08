@@ -1,8 +1,6 @@
-#include <array>
-#include "llvm/ADT/STLExtras.h"
 #include "Utility.h"
-#include "TargetInfo.h"
 #include "PatternTritonGPUOpToLLVM.h"
+#include "TargetInfo.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
@@ -10,6 +8,8 @@
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "llvm/ADT/STLExtras.h"
+#include <array>
 
 using mlir::triton::AMD::DppCtrl;
 using mlir::triton::AMD::ISAFamily;
@@ -92,8 +92,8 @@ static Value shuffleCommon(Location loc, RewriterBase &rewriter, Value val,
     if (bits < 32)
       val = sext(i32_ty, val);
 
-    val = shuffleCommon(loc, rewriter, val, i, strideInt, mode, clamp,
-                        isaFamily);
+    val =
+        shuffleCommon(loc, rewriter, val, i, strideInt, mode, clamp, isaFamily);
 
     if (bits < 32)
       val = trunc(int_ty(bits), val);
@@ -149,11 +149,11 @@ static Value shuffleCommon(Location loc, RewriterBase &rewriter, Value val,
       Value offset = i32_val(0x401F);
       return rewriter.create<ROCDL::DsSwizzleOp>(loc, valType, val, offset);
     } else {
-      if (!llvm::is_contained(
-              {ISAFamily::GCN5, ISAFamily::VEGA20, ISAFamily::CDNA1,
-               ISAFamily::CDNA2, ISAFamily::CDNA3, ISAFamily::RDNA1,
-               ISAFamily::RDNA2, ISAFamily::RDNA3},
-              isaFamily)) {
+      if (!llvm::is_contained({ISAFamily::GCN5, ISAFamily::VEGA20,
+                               ISAFamily::CDNA1, ISAFamily::CDNA2,
+                               ISAFamily::CDNA3, ISAFamily::RDNA1,
+                               ISAFamily::RDNA2, ISAFamily::RDNA3},
+                              isaFamily)) {
         // DPP is supported for GCN5, VEGA20, CDNA1-3, and RDNA1-3.
         // Other architectures fall back to ds_swizzle.
         //
@@ -366,8 +366,8 @@ void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
   LLVM::createLLVMCallOp(rewriter, loc, funcOp, ValueRange({ptr, val, pred}));
 }
 
-static int32_t getCtrlBitsForCacheModifierOnCDNA(
-    triton::CacheModifier cm, bool isBufferLoad) {
+static int32_t getCtrlBitsForCacheModifierOnCDNA(triton::CacheModifier cm,
+                                                 bool isBufferLoad) {
   const int sc0Bit = 0b1;
   const int ntBit = 0b10;
   const int sc1Bit = 0b1000;
@@ -385,9 +385,9 @@ static int32_t getCtrlBitsForCacheModifierOnCDNA(
   }
 }
 
-int32_t getCtrlBitsForCacheModifierOnTarget(
-    triton::CacheModifier cm, bool isBufferLoad,
-    const triton::AMD::TargetInfo &targetInfo) {
+int32_t
+getCtrlBitsForCacheModifierOnTarget(triton::CacheModifier cm, bool isBufferLoad,
+                                    const triton::AMD::TargetInfo &targetInfo) {
   using triton::AMD::ISAFamily;
   switch (targetInfo.getISAFamily()) {
   case ISAFamily::CDNA1:
@@ -404,12 +404,10 @@ bool canCoalesceWriteIntoSharedMemory(RankedTensorType srcTy,
                                       unsigned vectorSize) {
   auto shape = srcTy.getShape();
   auto srcLayout = triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
-  auto sharedLayout =
-      triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
+  auto sharedLayout = triton::gpu::toLinearLayout(shape, dstTy.getEncoding());
   if (!srcLayout || !sharedLayout)
     return false;
-  LinearLayout srcToSharedLayout =
-      srcLayout->invertAndCompose(*sharedLayout);
+  LinearLayout srcToSharedLayout = srcLayout->invertAndCompose(*sharedLayout);
   StringAttr lane = StringAttr::get(srcTy.getContext(), "lane");
   for (int inLane : llvm::seq(srcToSharedLayout.getInDimSizeLog2(lane))) {
     auto basis = srcToSharedLayout.getBasis(lane, inLane)[0];

@@ -48,15 +48,15 @@ void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
              triton::CacheModifier cm = triton::CacheModifier::NONE);
 
 // Return the ROCDL cache-control word used by direct buffer/global LDS loads.
-int32_t getCtrlBitsForCacheModifierOnTarget(
-    triton::CacheModifier cm, bool isBufferLoad,
-    const triton::AMD::TargetInfo &targetInfo);
+int32_t
+getCtrlBitsForCacheModifierOnTarget(triton::CacheModifier cm, bool isBufferLoad,
+                                    const triton::AMD::TargetInfo &targetInfo);
 
 // Return true when the source-to-shared layout writes contiguous LDS chunks
 // for the requested vector width.
-bool canCoalesceWriteIntoSharedMemory(
-    RankedTensorType srcTy, triton::gpu::MemDescType dstTy,
-    unsigned vectorSize);
+bool canCoalesceWriteIntoSharedMemory(RankedTensorType srcTy,
+                                      triton::gpu::MemDescType dstTy,
+                                      unsigned vectorSize);
 } // namespace mlir::LLVM::AMD
 
 #endif

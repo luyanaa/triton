@@ -7,8 +7,7 @@ using ::mlir::triton::gpu::AMDWmmaEncodingAttr;
 using ::mlir::triton::gpu::getShapePerCTA;
 
 namespace mlir::triton::AMD {
-LogicalResult convertAMDFMADot(triton::DotOp op,
-                               triton::DotOp::Adaptor adaptor,
+LogicalResult convertAMDFMADot(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                                const LLVMTypeConverter *typeConverter,
                                ConversionPatternRewriter &rewriter);
 

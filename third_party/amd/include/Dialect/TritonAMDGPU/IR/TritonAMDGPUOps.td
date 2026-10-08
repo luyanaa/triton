@@ -140,7 +140,7 @@ def BufferLoadToLocalOp : TT_AMDGPU_Op<"buffer_load_to_local", [
   let summary = "Load from a scalar base pointer and a tensor offset to shared memory";
   let description = [{ AMD buffer load operation that directly writes to shared memory. }];
   let arguments = (ins
-    TTG_MemDescType:$dest,
+    TT_MemDescType:$dest,
     TT_Ptr:$ptr,
     I32Tensor:$offsets,
     Optional<TT_BoolTensor>:$mask,

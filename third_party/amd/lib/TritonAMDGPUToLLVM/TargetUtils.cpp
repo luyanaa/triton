@@ -60,5 +60,4 @@ bool supportsVDot(llvm::StringRef arch) {
   }
 }
 
-
 } // namespace mlir::triton::AMD

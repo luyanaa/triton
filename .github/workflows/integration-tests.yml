@@ -167,6 +167,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: "true"
+      - name: Install build tools
+        if: matrix.runner == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache
       - name: Compute cache keys
         id: cache-key
         run: |

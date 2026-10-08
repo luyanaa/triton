@@ -620,8 +620,8 @@ static bool isInt8DotWithInt32Accumulator(tt::DotOp dotOp) {
   auto bType = cast<RankedTensorType>(dotOp.getB().getType()).getElementType();
   auto cType = cast<RankedTensorType>(dotOp.getC().getType()).getElementType();
   auto dType = cast<RankedTensorType>(dotOp.getD().getType()).getElementType();
-  return aType.isInteger(8) && bType.isInteger(8) &&
-         cType.isInteger(32) && dType.isInteger(32);
+  return aType.isInteger(8) && bType.isInteger(8) && cType.isInteger(32) &&
+         dType.isInteger(32);
 }
 
 static bool supportsExactInt8Dot(tt::DotOp dotOp, StringRef arch) {
@@ -657,8 +657,8 @@ public:
 
     Type sourceElementType = sourceType.getElementType();
     if (isFloat(sourceElementType) && isFloat(elementType)) {
-      auto roundingMode = RoundingModeAttr::get(rewriter.getContext(),
-                                                RoundingMode::RTNE);
+      auto roundingMode =
+          RoundingModeAttr::get(rewriter.getContext(), RoundingMode::RTNE);
       return rewriter.create<FpToFpOp>(loc, destinationType, value,
                                        roundingMode);
     }
@@ -704,8 +704,8 @@ public:
     for (Type type : operandTypes)
       maxBitWidth = std::max(maxBitWidth, type.getIntOrFloatBitWidth());
     assert(maxBitWidth <= 32);
-    Type commonType = maxBitWidth <= 16 ? rewriter.getF16Type()
-                                        : rewriter.getF32Type();
+    Type commonType =
+        maxBitWidth <= 16 ? rewriter.getF16Type() : rewriter.getF32Type();
     if (commonType.isF16()) {
       for (Type type : operandTypes) {
         if ((type.isInteger() && type.getIntOrFloatBitWidth() > 8) ||

@@ -127,9 +127,8 @@ struct DotOpMFMAConversionHelper {
     if (reduceSubBlocks) {
       while (subBlockSize < warpSize) {
         for (int i = 0; i < numScalars; ++i) {
-          Value other_acc =
-              shuffleXor(loc, rewriter, accScalar[i], subBlockSize,
-                         getISAFamily());
+          Value other_acc = shuffleXor(loc, rewriter, accScalar[i],
+                                       subBlockSize, getISAFamily());
           if (elemType.isInteger(32))
             accScalar[i] = add(accScalar[i], other_acc);
           else

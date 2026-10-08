@@ -58,7 +58,8 @@ class AMDFMAVectorMultiplier final : public FMAVectorMultiplier {
     assert(aElementType == dElementType &&
            (aElementType.isF16() || aElementType.isF32()) &&
            "unsupported AMD FMA dot element types");
-    return {1, aElementType,
+    return {1,
+            aElementType,
             aElementType.isF16() ? "llvm.fmuladd.f16" : "llvm.fmuladd.f32",
             {}};
   }
@@ -95,13 +96,12 @@ public:
   Value multiplyVectors(ArrayRef<Value> a, ArrayRef<Value> b,
                         Value c) override {
     assert(a.size() == b.size());
-    assert(intrinsic.vectorSize == 1 ||
-           a.size() % intrinsic.vectorSize == 0);
+    assert(intrinsic.vectorSize == 1 || a.size() % intrinsic.vectorSize == 0);
     Value accumulator = c;
     for (unsigned k = 0; k < a.size(); k += intrinsic.vectorSize)
-      accumulator = generateDot(packOperand(a, k, intrinsic.vectorSize),
-                                packOperand(b, k, intrinsic.vectorSize),
-                                accumulator);
+      accumulator =
+          generateDot(packOperand(a, k, intrinsic.vectorSize),
+                      packOperand(b, k, intrinsic.vectorSize), accumulator);
     return accumulator;
   }
 };

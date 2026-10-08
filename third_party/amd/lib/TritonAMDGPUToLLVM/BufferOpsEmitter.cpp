@@ -39,7 +39,8 @@ namespace mlir::LLVM::AMD {
 BufferEmitter::BufferEmitter(RewriterBase &rw, Location loc, TargetInfo ti)
     : rewriter(rw), loc(loc), targetInfo(ti) {}
 
-Value BufferEmitter::createResourceDescriptor(Value basePtr, Value blockStride) {
+Value BufferEmitter::createResourceDescriptor(Value basePtr,
+                                              Value blockStride) {
   // 1. Create the resource descriptor
   // bits 0-11: dst sel, ignored by these intrinsics
   // bits 12-14: data format (ignored, must be nonzero, 7=float)
@@ -67,10 +68,10 @@ Value BufferEmitter::createResourceDescriptor(Value basePtr, Value blockStride) 
   Value stride = int_val(16, 0);
   if (blockStride && targetInfo.getISAFamily() == ISAFamily::CDNA3) {
     Value stride16 = rewriter.create<LLVM::TruncOp>(loc, i16_ty, blockStride);
-    Value strideValue = rewriter.create<LLVM::AndOp>(
-        loc, stride16, int_val(16, 16383));
-    stride = rewriter.create<LLVM::OrOp>(loc, strideValue,
-                                         int_val(16, 1 << 14));
+    Value strideValue =
+        rewriter.create<LLVM::AndOp>(loc, stride16, int_val(16, 16383));
+    stride =
+        rewriter.create<LLVM::OrOp>(loc, strideValue, int_val(16, 1 << 14));
   }
   Value flagsConst = int_val(32, flags);
   Type rsrcType = LLVM::LLVMPointerType::get(rewriter.getContext(), 8);
@@ -102,8 +103,8 @@ void BufferEmitter::emitLoadToLds(Type type, Value byteWidth, Value rsrcDesc,
                  /*isBufferLoad=*/true);
   rewriter.create<ROCDL::RawPtrBufferLoadLdsOp>(
       loc, TypeRange{},
-      ValueRange{commonArgs[0], dst, byteWidth, commonArgs[1],
-                 int_val(32, 0), commonArgs[2], commonArgs[3]},
+      ValueRange{commonArgs[0], dst, byteWidth, commonArgs[1], int_val(32, 0),
+                 commonArgs[2], commonArgs[3]},
       ArrayRef<NamedAttribute>());
 }
 

@@ -349,9 +349,9 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
                   shapePerCTABTile, shapePerCTANonKTile, sharedLayout,
                   opTensorShape, strides);
             } else {
-              offset = computeNonSwizzledOffset(
-                  rewriter, loc, idx, dim, opTensorShape, shapePerCTABTile,
-                  shapePerCTANonKTile, strides);
+              offset = computeNonSwizzledOffset(rewriter, loc, idx, dim,
+                                                opTensorShape, shapePerCTABTile,
+                                                shapePerCTANonKTile, strides);
             }
 
             Value elemAddr = gep(ptrTy, elemTy, basePtr, offset);

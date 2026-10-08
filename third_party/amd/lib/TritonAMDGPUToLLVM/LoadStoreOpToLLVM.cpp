@@ -1,4 +1,3 @@
-#include "llvm/ADT/STLExtras.h"
 #include "BufferOpsEmitter.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "PatternTritonGPUOpToLLVM.h"
@@ -15,6 +14,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace mlir::triton::gpu;
@@ -419,8 +419,8 @@ struct BufferLoadToLocalOpConversion
   matchAndRewrite(triton::amdgpu::BufferLoadToLocalOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     if (!targetInfo.supportsBufferLoadToLocalBitWidth(32))
-      return rewriter.notifyMatchFailure(op,
-                                         "target does not support buffer load to LDS");
+      return rewriter.notifyMatchFailure(
+          op, "target does not support buffer load to LDS");
 
     auto loc = op.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -447,11 +447,12 @@ struct BufferLoadToLocalOpConversion
 
     auto dstTy = op.getDest().getType();
     if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(ptrType, dstTy, vec))
-      return rewriter.notifyMatchFailure(op, "does not write coalesced into LDS");
+      return rewriter.notifyMatchFailure(op,
+                                         "does not write coalesced into LDS");
 
     auto resElemTy = getTypeConverter()->convertType(dstTy.getElementType());
-    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
-        loc, llDst, resElemTy, rewriter);
+    auto smemObj =
+        LLVM::getSharedMemoryObjectFromStruct(loc, llDst, resElemTy, rewriter);
     VectorType vecTy;
     SmallVector<Value> shmemAddrs;
     bool ok = emitTransferBetweenRegistersAndShared(
@@ -506,13 +507,13 @@ struct AsyncCopyGlobalToLocalOpConversion
   matchAndRewrite(triton::gpu::AsyncCopyGlobalToLocalOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     using AMD::ISAFamily;
-    if (!llvm::is_contained({ISAFamily::CDNA1, ISAFamily::CDNA2,
-                             ISAFamily::CDNA3}, targetInfo.getISAFamily()))
+    if (!llvm::is_contained(
+            {ISAFamily::CDNA1, ISAFamily::CDNA2, ISAFamily::CDNA3},
+            targetInfo.getISAFamily()))
       return rewriter.notifyMatchFailure(
           op, "global load to LDS is only supported on CDNA1-3");
 
-    if (op.getEvict() != triton::EvictionPolicy::NORMAL ||
-        op.getIsVolatile())
+    if (op.getEvict() != triton::EvictionPolicy::NORMAL || op.getIsVolatile())
       return rewriter.notifyMatchFailure(
           op, "global load to LDS does not support eviction or volatility");
 
@@ -520,7 +521,8 @@ struct AsyncCopyGlobalToLocalOpConversion
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto srcTy = op.getSrc().getType();
     if (!isa<BlockedEncodingAttr, SliceEncodingAttr>(srcTy.getEncoding()))
-      return rewriter.notifyMatchFailure(op, "requires Blocked or Slice encoding for src");
+      return rewriter.notifyMatchFailure(
+          op, "requires Blocked or Slice encoding for src");
     if (srcTy.getShape().size() != 2)
       return rewriter.notifyMatchFailure(op, "only supports 2d tensors");
     auto dstTy = op.getResult().getType();
@@ -528,13 +530,14 @@ struct AsyncCopyGlobalToLocalOpConversion
     Value llSrc = adaptor.getSrc();
     auto srcElems = unpackLLElements(loc, llSrc, rewriter);
     Value llDst = adaptor.getResult();
-    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
-        loc, llDst, resElemTy, rewriter);
+    auto smemObj =
+        LLVM::getSharedMemoryObjectFromStruct(loc, llDst, resElemTy, rewriter);
     unsigned maxVec = getVectorSize(op.getSrc());
     SmallVector<Value> maskElems = getMaskElemsAndUpdateVeclen(
         rewriter, loc, adaptor.getMask(), op.getMask(), maxVec);
     if (!LLVM::AMD::canCoalesceWriteIntoSharedMemory(srcTy, dstTy, maxVec))
-      return rewriter.notifyMatchFailure(op, "does not write coalesced into LDS");
+      return rewriter.notifyMatchFailure(op,
+                                         "does not write coalesced into LDS");
 
     VectorType vecTy;
     SmallVector<Value> shmemAddrs;
@@ -550,8 +553,8 @@ struct AsyncCopyGlobalToLocalOpConversion
     if (!targetInfo.supportsGlobalLoadLDSBitWidth(vecBits))
       return rewriter.notifyMatchFailure(
           op, "global load to LDS does not support the required load width");
-    Value cacheModifiers = b.i32_val(
-        LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
+    Value cacheModifiers =
+        b.i32_val(LLVM::AMD::getCtrlBitsForCacheModifierOnTarget(
             op.getCache(), /*isBufferLoad=*/false, targetInfo));
     SmallVector<Value> otherElems;
     if (op.getOther())
@@ -605,9 +608,9 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     auto family = targetInfo.getISAFamily();
     bool isCdna = llvm::is_contained(
         {ISAFamily::CDNA1, ISAFamily::CDNA2, ISAFamily::CDNA3}, family);
-    bool isGfx9Wait = op.getNum() == 0 &&
-                      llvm::is_contained(
-                          {ISAFamily::GCN5, ISAFamily::VEGA20}, family);
+    bool isGfx9Wait =
+        op.getNum() == 0 &&
+        llvm::is_contained({ISAFamily::GCN5, ISAFamily::VEGA20}, family);
     if (!isCdna && !isGfx9Wait)
       return rewriter.notifyMatchFailure(
           op, "async wait is supported on CDNA1-3 and GFX9 num=0");
@@ -615,7 +618,8 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     unsigned highBits = (op.getNum() >> 4) << 14;
     unsigned waitValue = lowBits | highBits | ~0xC00Fu;
     rewriter.create<ROCDL::WaitcntOp>(op.getLoc(), waitValue);
-    rewriter.replaceOp(op, TritonLLVMOpBuilder(op.getLoc(), rewriter).i32_val(0));
+    rewriter.replaceOp(op,
+                       TritonLLVMOpBuilder(op.getLoc(), rewriter).i32_val(0));
     return success();
   }
 
@@ -629,7 +633,8 @@ struct AsyncCommitGroupOpConversion
   LogicalResult
   matchAndRewrite(AsyncCommitGroupOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, TritonLLVMOpBuilder(op.getLoc(), rewriter).i32_val(0));
+    rewriter.replaceOp(op,
+                       TritonLLVMOpBuilder(op.getLoc(), rewriter).i32_val(0));
     return success();
   }
 };
@@ -1086,12 +1091,11 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        int numWarps,
                                        ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                        PatternBenefit benefit) {
-  patterns
-      .add<AtomicCASOpConversion, AtomicRMWOpConversion, LoadOpConversion,
-           StoreOpConversion, BufferLoadOpConversion,
-           BufferLoadToLocalOpConversion, BufferStoreOpConversion,
-           AsyncCopyGlobalToLocalOpConversion>(typeConverter, targetInfo,
-                                                axisInfoAnalysis, benefit);
+  patterns.add<AtomicCASOpConversion, AtomicRMWOpConversion, LoadOpConversion,
+               StoreOpConversion, BufferLoadOpConversion,
+               BufferLoadToLocalOpConversion, BufferStoreOpConversion,
+               AsyncCopyGlobalToLocalOpConversion>(typeConverter, targetInfo,
+                                                   axisInfoAnalysis, benefit);
   patterns.add<AsyncWaitOpConversion>(typeConverter, targetInfo, benefit);
   patterns.add<AsyncCommitGroupOpConversion>(typeConverter, benefit);
 }

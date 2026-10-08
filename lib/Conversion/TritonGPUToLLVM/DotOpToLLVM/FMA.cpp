@@ -19,8 +19,8 @@ public:
     assert(a.size() == b.size());
     Value accumulator = c;
     for (auto [aElement, bElement] : llvm::zip(a, b))
-      accumulator = builder.create<LLVM::FMulAddOp>(loc, aElement, bElement,
-                                                    accumulator);
+      accumulator =
+          builder.create<LLVM::FMulAddOp>(loc, aElement, bElement, accumulator);
     return accumulator;
   }
 };

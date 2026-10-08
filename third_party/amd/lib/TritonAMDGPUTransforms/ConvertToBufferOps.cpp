@@ -1,7 +1,5 @@
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
-#include "llvm/ADT/STLExtras.h"
 #include "TritonAMDGPUToLLVM/Utility.h"
-#include "triton/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.h"
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -16,11 +14,13 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
-#include "triton/Analysis/Utility.h"
 #include "triton/Analysis/AxisInfo.h"
+#include "triton/Analysis/Utility.h"
+#include "triton/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include <deque>
 #include <optional>
@@ -179,8 +179,8 @@ static unsigned getBufferVectorSize(Value ptr, Value offset,
   auto *ptrAxisInfo = axisInfo.getAxisInfo(ptr);
   unsigned elementBytes =
       std::max<unsigned>(tt::getPointeeBitWidth(ptr.getType()) / 8, 1);
-  unsigned alignment = std::max<int64_t>(
-      ptrAxisInfo->getDivisibility(0) / elementBytes, 1);
+  unsigned alignment =
+      std::max<int64_t>(ptrAxisInfo->getDivisibility(0) / elementBytes, 1);
   contiguity = std::min<unsigned>(alignment, contiguity);
   return std::min<unsigned>(128 / tt::getPointeeBitWidth(ptr.getType()),
                             contiguity);
@@ -203,16 +203,15 @@ struct ConvertStreamLoadToBufferLoad
     if (!load || !load->getResult(0).hasOneUse() ||
         !load.getBoundaryCheck().empty() || load.getPaddingAttr() ||
         load.getEvict() != triton::EvictionPolicy::NORMAL ||
-        load.getIsVolatile() ||
-        !canUseBufferOps(load.getPtr(), assumptions))
+        load.getIsVolatile() || !canUseBufferOps(load.getPtr(), assumptions))
       return failure();
     auto addPtr = load.getPtr().getDefiningOp<triton::AddPtrOp>();
     auto splat = addPtr.getPtr().getDefiningOp<triton::SplatOp>();
     if (!splat)
       return failure();
 
-    unsigned vec = getBufferVectorSize(splat.getSrc(), addPtr.getOffset(),
-                                       axisInfo);
+    unsigned vec =
+        getBufferVectorSize(splat.getSrc(), addPtr.getOffset(), axisInfo);
     if (load.getMask())
       vec = std::min(vec, axisInfo.getMaskAlignment(load.getMask()));
     auto srcTy = cast<RankedTensorType>(load.getPtr().getType());
@@ -246,7 +245,8 @@ private:
 
 struct ConvertAsyncCopyToBufferLoad
     : public mlir::OpRewritePattern<triton::gpu::AsyncCopyGlobalToLocalOp> {
-  ConvertAsyncCopyToBufferLoad(MLIRContext *context, DenseSet<Value> &assumptions,
+  ConvertAsyncCopyToBufferLoad(MLIRContext *context,
+                               DenseSet<Value> &assumptions,
                                tt::ModuleAxisInfoAnalysis &axisInfo,
                                bool enabled)
       : OpRewritePattern(context), assumptions(assumptions), axisInfo(axisInfo),
@@ -261,8 +261,8 @@ struct ConvertAsyncCopyToBufferLoad
     auto splat = addPtr.getPtr().getDefiningOp<triton::SplatOp>();
     if (!splat)
       return failure();
-    unsigned vec = getBufferVectorSize(splat.getSrc(), addPtr.getOffset(),
-                                       axisInfo);
+    unsigned vec =
+        getBufferVectorSize(splat.getSrc(), addPtr.getOffset(), axisInfo);
     if (op.getMask())
       vec = std::min(vec, axisInfo.getMaskAlignment(op.getMask()));
     auto srcTy = cast<RankedTensorType>(op.getSrc().getType());
@@ -280,7 +280,8 @@ struct ConvertAsyncCopyToBufferLoad
         addPtr.getOffset(), maybeMask, maybeOther, blockStride, op.getCache());
     if (auto opIdxAttr = op->getAttrOfType<triton::amdgpu::OpIdxAttr>(
             triton::amdgpu::OpIdxAttr::getMnemonic()))
-      bufferLoadOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(), opIdxAttr);
+      bufferLoadOp->setAttr(triton::amdgpu::OpIdxAttr::getMnemonic(),
+                            opIdxAttr);
     if (op.getToken().use_empty())
       rewriter.create<triton::gpu::AsyncWaitOp>(op.getLoc(),
                                                 bufferLoadOp.getToken(), 0);
@@ -416,10 +417,10 @@ public:
            triton::AMD::ISAFamily::CDNA1, triton::AMD::ISAFamily::CDNA2,
            triton::AMD::ISAFamily::CDNA3},
           family);
-      enableGlobalLoadLDS = llvm::is_contained(
-          {triton::AMD::ISAFamily::CDNA1, triton::AMD::ISAFamily::CDNA2,
-           triton::AMD::ISAFamily::CDNA3},
-          family);
+      enableGlobalLoadLDS = llvm::is_contained({triton::AMD::ISAFamily::CDNA1,
+                                                triton::AMD::ISAFamily::CDNA2,
+                                                triton::AMD::ISAFamily::CDNA3},
+                                               family);
     }
     tt::ModuleAxisInfoAnalysis axisInfo(m);
     patterns.add<ConvertAsyncCopyToBufferLoad>(context, assumptions, axisInfo,

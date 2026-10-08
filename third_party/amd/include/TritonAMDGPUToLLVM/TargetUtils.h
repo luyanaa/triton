@@ -1,8 +1,8 @@
 #ifndef TRITON_CONVERSION_TRITONGPU_TO_LLVM_TARGETUTILS_H
 #define TRITON_CONVERSION_TRITONGPU_TO_LLVM_TARGETUTILS_H
 
-#include <cstdint>
 #include "llvm/ADT/StringRef.h"
+#include <cstdint>
 
 namespace mlir::triton::AMD {
 
