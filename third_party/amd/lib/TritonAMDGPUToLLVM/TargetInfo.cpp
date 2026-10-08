@@ -177,16 +177,18 @@ bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
   if (numLaneToReduce != 64 && numLaneToReduce != 32)
     return false;
 
+  // This fast path uses row_bcast:15/31, which is unsupported on RDNA.
   if (!llvm::is_contained(
           {ISAFamily::GCN5, ISAFamily::VEGA20, ISAFamily::CDNA1,
-           ISAFamily::CDNA2, ISAFamily::CDNA3, ISAFamily::RDNA1,
-           ISAFamily::RDNA2, ISAFamily::RDNA3},
+           ISAFamily::CDNA2, ISAFamily::CDNA3},
           getISAFamily())) {
     return false;
   }
 
   Operation *reduxOp = op.getSingleCombiner();
-  if (!reduxOp)
+  // bound_ctrl contributes zero for out-of-range lanes. Only addition has
+  // zero as its reduction identity; use the generic path for other combiners.
+  if (!reduxOp || !isa<arith::AddFOp, arith::AddIOp>(reduxOp))
     return false;
 
   auto createDppReduxOpWithBoundCtrl = [&](Type valType, Value &src,

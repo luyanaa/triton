@@ -101,31 +101,11 @@ module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 :
 module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32, "triton_gpu.threads-per-warp" = 64 : i32} {
   // CHECK-LABEL: reduce_dpp_max
   tt.func @reduce_dpp_max(%arg0: tensor<64xf32, #blocked3>) {
-    // CHECK: rocdl.update.dpp
-    // CHECK-SAME: with 280, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 276, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 274, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 273, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 322, 10, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 323, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK: llvm.amdgcn.readlane
+    // CHECK-NOT: with 322,
+    // CHECK-NOT: with 323,
+    // CHECK: rocdl.ds_swizzle
+    // CHECK: llvm.intr.maxnum
+    // CHECK: llvm.return
     %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
     ^bb0(%arg1: f32, %arg2: f32):
       %1 = arith.maxnumf %arg1, %arg2 : f32
@@ -177,31 +157,11 @@ module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 :
 module attributes {"triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 1 : i32, "triton_gpu.threads-per-warp" = 64 : i32} {
   // CHECK-LABEL: reduce_dpp_max
   tt.func @reduce_dpp_max(%arg0: tensor<64xf32, #blocked3>) {
-    // CHECK: rocdl.update.dpp
-    // CHECK-SAME: with 280, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 276, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 274, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 273, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 322, 10, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK-NEXT: rocdl.update.dpp
-    // CHECK-SAME: with 323, 15, 15, true : f32
-    // CHECK-NEXT: llvm.intr.maxnum
-
-    // CHECK: llvm.amdgcn.readlane
+    // CHECK-NOT: with 322,
+    // CHECK-NOT: with 323,
+    // CHECK: rocdl.ds_swizzle
+    // CHECK: llvm.intr.maxnum
+    // CHECK: llvm.return
     %0 = "tt.reduce"(%arg0) <{axis = 0 : i32}> ({
     ^bb0(%arg1: f32, %arg2: f32):
       %1 = arith.maxnumf %arg1, %arg2 : f32
