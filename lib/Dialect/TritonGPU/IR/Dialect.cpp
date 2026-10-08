@@ -1074,13 +1074,18 @@ LogicalResult DotOperandEncodingAttr::verify(
     return emitError() << "triton_gpu.dot_op parent paramenter cannot be null";
   }
   if (auto parentAttr = mlir::dyn_cast<NvidiaMmaEncodingAttr>(parent)) {
-    if (kWidth != 0 && !parentAttr.isAmpere())
+    if (kWidth != 0 && !(parentAttr.isAmpere() || parentAttr.isHopper()))
       return emitError() << "triton_gpu.dot_op kWidth parameter can only be "
-                            "non-zero for Ampere MMA parent";
-    if (kWidth == 0 && parentAttr.isAmpere())
+                            "non-zero for Ampere or Hopper MMA parent";
+    if (kWidth == 0 && (parentAttr.isAmpere() || parentAttr.isHopper()))
       return emitError()
              << "triton_gpu.dot_op kWidth parameter is mandatory for "
-                "Ampere MMA parent";
+                "Ampere or Hopper MMA parent";
+    if (opIdx != 0 && parentAttr.isHopper())
+      return emitError()
+             << "triton_gpu.dot_op opIdx parameter must be 0 for "
+                "Hopper MMA parent, since Hopper WGMMA only allows first "
+                "operand to be in registers";
     return success();
   }
 

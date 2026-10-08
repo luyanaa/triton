@@ -10,9 +10,17 @@
 // during to LLVM conversion/lowering to facilitate instruction scheduling
 // controls.
 namespace mlir::triton {
+void setNumGeneratedMMAs(DotOp op, size_t mmaCount, unsigned m, unsigned n,
+                         unsigned k, Type elementType);
+
 template <typename LoadOpType>
 void setNumGeneratedGlobalLoads(LoadOpType op, size_t globalLoadsCount,
                                 Type type);
+void setNumGeneratedDsReads(gpu::LocalLoadOp op, size_t numDsReadsCount,
+                            Type type);
+void storeOpConversionCallback(triton::gpu::LocalStoreOp op, size_t llvmOpCount,
+                               Type type);
+triton::DotOp getSingleDotOpIfExists(scf::ForOp forOp);
 } // namespace mlir::triton
 
 #endif

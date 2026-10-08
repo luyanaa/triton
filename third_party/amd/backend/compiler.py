@@ -227,7 +227,6 @@ class HIPBackend(BaseBackend):
                                              "equivalent behavior in the past.")
             amd.passes.ttgpuir.add_stream_pipelinev2(pm, options.num_stages)
             passes.common.add_canonicalizer(pm)
-        amd.passes.ttgpuir.insert_instruction_sched_hints(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_reduce_data_duplication(pm)
@@ -257,6 +256,7 @@ class HIPBackend(BaseBackend):
         # LDS size is determined by provided arch name.
         custom_lds_size = 0
         amd.passes.ttgpuir.add_optimize_lds_usage(pm, options.arch, custom_lds_size)
+        amd.passes.ttgpuir.insert_instruction_sched_hints(pm)
         passes.convert.add_scf_to_cf(pm)
         passes.convert.add_index_to_llvmir(pm)
 
@@ -278,7 +278,7 @@ class HIPBackend(BaseBackend):
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
         passes.common.add_symbol_dce(pm)
-        amd.passes.ttgpuir.lower_instruction_sched_hints(pm, options.instruction_sched_variant)
+        amd.passes.ttgpuir.lower_instruction_sched_hints(pm, options.num_stages, options.instruction_sched_variant)
         if os.environ.get("TRITON_DISABLE_LINE_INFO", "0") == "0":
             passes.llvmir.add_di_scope(pm)
         amd.passes.ttgpuir.add_builtin_func_to_llvmir(pm, __HIP_FTZ)

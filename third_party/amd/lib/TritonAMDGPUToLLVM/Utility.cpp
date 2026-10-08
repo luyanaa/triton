@@ -11,6 +11,8 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
+using mlir::triton::AMD::DppCtrl;
+using mlir::triton::AMD::ISAFamily;
 using mlir::triton::gpu::appendOrGetExternFuncOp;
 using mlir::triton::gpu::getFunctionType;
 
@@ -143,6 +145,9 @@ static Value shuffleCommon(Location loc, RewriterBase &rewriter, Value val,
       Value stride = i32_val(32);
       Value lineId = xor_(threadId, stride);
       return bpermute(lineId);
+    } else if (strideInt == 16) {
+      Value offset = i32_val(0x401F);
+      return rewriter.create<ROCDL::DsSwizzleOp>(loc, valType, val, offset);
     } else {
       if (!llvm::is_contained(
               {ISAFamily::GCN5, ISAFamily::VEGA20, ISAFamily::CDNA1,
@@ -260,7 +265,6 @@ Value shuffleIdx(Location loc, RewriterBase &rewriter, Value val, Value i,
   return shuffleCommon(loc, rewriter, val, i, 0, ShflKind::idx, i32_val(0x1f),
                        isaFamily);
 }
-
 Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
                int axis) {
   assert(axis >= 0);

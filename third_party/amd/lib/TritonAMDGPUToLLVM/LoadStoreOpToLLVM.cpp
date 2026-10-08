@@ -278,6 +278,7 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
 
     auto cacheMod = op.getCache();
     SmallVector<Value> loadedVals;
+    Type vecTy = LLVM::getFixedVectorType(valueElemTy, vec);
     for (size_t vecStart = 0; vecStart < numElems; vecStart += vec) {
       const size_t maxWordWidth = std::max<size_t>(32, valueElemNBits);
       const size_t totalWidth = valueElemNBits * vec;
@@ -288,7 +289,6 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
       assert(wordNElems * nWords * numVecs == numElems);
 
       Value pred = mask ? maskElems[vecStart] : int_val(1, 1);
-      auto vecTy = LLVM::getFixedVectorType(valueElemTy, vec);
       Value ptr = addrspacecast(ptr_ty(getContext()), ptrElems[vecStart]);
 
       Value falseVal = createZeroVector(rewriter, loc, cast<VectorType>(vecTy));
@@ -311,6 +311,9 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
     Type llvmResultStructTy = getTypeConverter()->convertType(valueTy);
     Value resultStruct = packLLElements(loc, getTypeConverter(), loadedVals,
                                         rewriter, llvmResultStructTy);
+
+    setNumGeneratedGlobalLoads(op, numVecs, vecTy);
+
     rewriter.replaceOp(op, {resultStruct});
     return success();
   }
@@ -1003,7 +1006,11 @@ struct AtomicRMWOpConversion
     // tensor
     if (tensorTy) {
       auto valTy = cast<RankedTensorType>(val.getType());
-      vec = std::min<unsigned>(vec, valTy.getElementType().isF16() ? 2 : 1);
+      Type elTy = valTy.getElementType();
+      vec = std::min<unsigned>(vec, llvm::isa<FloatType>(elTy) &&
+                                            elTy.getIntOrFloatBitWidth() == 16
+                                        ? 2
+                                        : 1);
       // mask
       numElems = tensorTy.getNumElements();
     }
@@ -1018,12 +1025,21 @@ struct AtomicRMWOpConversion
     auto vecTy = vec_ty(valueElemTy, vec);
     auto retType = vec == 1 ? valueElemTy : vecTy;
     SmallVector<Value> resultVals(elemsPerThread);
-    const bool f16v2 = vec == 2 && valueElemTy.isF16();
     for (size_t i = 0; i < elemsPerThread; i += vec) {
       Value rmwPtr = ptrElements[i];
       // TODO: in case llMask is zero we can create only one branch for all
       // elemsPerThread.
       Value rmwMask = llMask ? and_(mask, maskElements[i]) : mask;
+
+      Value operand;
+      if (vec == 1) {
+        operand = valElements[i];
+      } else {
+        operand = undef(vecTy);
+        for (size_t ii = 0; ii < vec; ++ii)
+          operand =
+              insert_element(vecTy, operand, valElements[i + ii], i32_val(ii));
+      }
 
       Value undefVal = undef(retType);
       // Build blocks to bypass the atomic instruction for ~rmwMask.
@@ -1041,25 +1057,11 @@ struct AtomicRMWOpConversion
       auto maybeKind = matchAtomicOp(atomicRmwAttr);
       // TODO: use rocdl.raw.buffer.atomic from ROCDL dialect to use efficient
       // atomics for MI-* series of AMD GPU.
-      Value atom = rewriter
-                       .create<LLVM::AtomicRMWOp>(
-                           loc, *maybeKind, rmwPtr, valElements[i],
-                           atomicMemOrdering, StringRef("agent"))
-                       .getResult();
-
-      // NV for the f16v2 case generates one packed instruction. We have to
-      // create two separate instructions since LLVM::AtomicRMWOp doesn't
-      // support this. Can be optimized out with rocdl.raw.buffer.atomic.
-      if (f16v2) {
-        Value atom2 =
-            rewriter
-                .create<LLVM::AtomicRMWOp>(
-                    loc, *maybeKind, ptrElements[i + 1], valElements[i + 1],
-                    atomicMemOrdering, StringRef("agent"))
-                .getResult();
-        auto tmp = insert_element(vecTy, undef(vecTy), atom, i32_val(0));
-        atom = insert_element(vecTy, tmp, atom2, i32_val(1)).getResult();
-      }
+      Value atom =
+          rewriter
+              .create<LLVM::AtomicRMWOp>(loc, *maybeKind, rmwPtr, operand,
+                                         atomicMemOrdering, StringRef("agent"))
+              .getResult();
       if (!tensorTy) {
         if (atomicNeedsSharedMemory(op.getResult())) {
           Value atomPtr =

@@ -372,9 +372,7 @@ struct ConvertTritonStoreToBufferStore
       Value tensorOffset = addPtrOp.getOffset();
       auto splatOp = tensorPtr.getDefiningOp<triton::SplatOp>();
       Value basePtr = splatOp.getSrc();
-      Value maybeMask{};
-      if (op.getMask() && !isZeroConst(op.getMask()))
-        maybeMask = op.getMask();
+      Value maybeMask = op.getMask();
       rewriter.replaceOpWithNewOp<triton::amdgpu::BufferStoreOp>(
           op, op.getValue(), basePtr, tensorOffset, maybeMask);
       return success();
@@ -406,6 +404,28 @@ public:
     });
     LDBG("Number of assumptions found: " << assumptions.size());
 
+    bool enableBufferLoadToLocal = false;
+    bool enableGlobalLoadLDS = false;
+    if (auto targetAttr =
+            m->getAttrOfType<StringAttr>(triton::AttrTargetName)) {
+      StringRef arch = targetAttr.getValue();
+      arch.consume_front("hip:");
+      auto family = triton::AMD::deduceISAFamily(arch);
+      enableBufferLoadToLocal = llvm::is_contained(
+          {triton::AMD::ISAFamily::GCN5, triton::AMD::ISAFamily::VEGA20,
+           triton::AMD::ISAFamily::CDNA1, triton::AMD::ISAFamily::CDNA2,
+           triton::AMD::ISAFamily::CDNA3},
+          family);
+      enableGlobalLoadLDS = llvm::is_contained(
+          {triton::AMD::ISAFamily::CDNA1, triton::AMD::ISAFamily::CDNA2,
+           triton::AMD::ISAFamily::CDNA3},
+          family);
+    }
+    tt::ModuleAxisInfoAnalysis axisInfo(m);
+    patterns.add<ConvertAsyncCopyToBufferLoad>(context, assumptions, axisInfo,
+                                               enableGlobalLoadLDS);
+    patterns.add<ConvertStreamLoadToBufferLoad>(context, assumptions, axisInfo,
+                                                enableBufferLoadToLocal);
     patterns.add<ConvertTritonLoadToBufferLoad>(context, assumptions);
     patterns.add<ConvertTritonStoreToBufferStore>(context, assumptions);
     if (applyPatternsAndFoldGreedily(m, std::move(patterns)).failed())

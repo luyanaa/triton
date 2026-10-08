@@ -44,7 +44,10 @@
 
 namespace mlir {
 namespace triton {
-namespace amdgpu {} // namespace amdgpu
+namespace amdgpu {
+inline constexpr char InstructionSchedLoopIdAttrName[] =
+    "triton.amdgpu.sched_loop_id";
+} // namespace amdgpu
 } // namespace triton
 } // namespace mlir
 

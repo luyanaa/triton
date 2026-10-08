@@ -19,7 +19,15 @@ enum class ISAFamily {
   RDNA3,
 };
 
-// A partial definition of the DPP control values used by the lowering.
+// Deduces the corresponding ISA family for the given target gfx |arch|.
+ISAFamily deduceISAFamily(llvm::StringRef arch);
+
+// Whether the target supports AMD vector-dot instructions.
+bool supportsVDot(llvm::StringRef arch);
+
+// Here is a partial definition of DppCtrl enums. For the complete definition,
+// please check:
+// https://github.com/llvm/llvm-project/blob/8c75290/llvm/lib/Target/AMDGPU/SIDefines.h#L939
 enum class DppCtrl : uint32_t {
   QUAD_PERM_FIRST = 0,
   ROW_SHL0 = 0x100,
@@ -27,9 +35,6 @@ enum class DppCtrl : uint32_t {
   BCAST15 = 0x142,
   BCAST31 = 0x143
 };
-
-// Deduces the corresponding ISA family for the given target gfx |arch|.
-ISAFamily deduceISAFamily(llvm::StringRef arch);
 
 } // namespace mlir::triton::AMD
 

@@ -6,6 +6,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "llvm/ADT/STLExtras.h"
 
+using mlir::triton::AMD::DppCtrl;
 namespace mlir::triton::AMD {
 
 namespace {
@@ -125,6 +126,47 @@ Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
 Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
                             ModuleOp moduleOp, int axis) const {
   return LLVM::AMD::llGetPid(loc, rewriter, moduleOp, axis);
+}
+
+// Cast and sext values into specific-length int to meet the requirements of
+// instructions like UpdateDpp or readlane if necessary.
+static inline Type castToAndSExtInt(RewriterBase &rewriter, Location loc,
+                                    Value &val, Type fromType,
+                                    unsigned toBits) {
+  unsigned originalBits = fromType.getIntOrFloatBitWidth();
+  Type toType = fromType;
+
+  if (!fromType.isIntOrIndex()) {
+    val = bitcast(val, int_ty(originalBits));
+    toType = int_ty(originalBits);
+  }
+
+  if (originalBits < toBits) {
+    val = sext(int_ty(toBits), val);
+    toType = int_ty(toBits);
+  }
+
+  return toType;
+}
+
+// Trunc the value to specific length and then cast it to given type if
+// necessary. This function is typically used in conjunction with
+// castToAndSExtInt.
+static inline Value truncAndCastFromInt(RewriterBase &rewriter, Location loc,
+                                        Value val, Type valType,
+                                        unsigned fromBits) {
+  unsigned originalBits = valType.getIntOrFloatBitWidth();
+  Value toVal = val;
+
+  if (originalBits < fromBits) {
+    toVal = trunc(int_ty(originalBits), toVal);
+  }
+
+  if (!valType.isIntOrIndex()) {
+    toVal = bitcast(toVal, valType);
+  }
+
+  return toVal;
 }
 
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
