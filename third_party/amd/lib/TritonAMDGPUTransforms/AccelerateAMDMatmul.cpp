@@ -615,6 +615,26 @@ public:
     return success();
   }
 };
+static bool isInt8DotWithInt32Accumulator(tt::DotOp dotOp) {
+  auto aType = cast<RankedTensorType>(dotOp.getA().getType()).getElementType();
+  auto bType = cast<RankedTensorType>(dotOp.getB().getType()).getElementType();
+  auto cType = cast<RankedTensorType>(dotOp.getC().getType()).getElementType();
+  auto dType = cast<RankedTensorType>(dotOp.getD().getType()).getElementType();
+  return aType.isInteger(8) && bType.isInteger(8) &&
+         cType.isInteger(32) && dType.isInteger(32);
+}
+
+static bool supportsExactInt8Dot(tt::DotOp dotOp, StringRef arch) {
+  if (!isInt8DotWithInt32Accumulator(dotOp) || !AMD::supportsVDot(arch))
+    return false;
+
+  auto aType = cast<RankedTensorType>(dotOp.getA().getType()).getElementType();
+  auto bType = cast<RankedTensorType>(dotOp.getB().getType()).getElementType();
+  auto aTensorType = cast<RankedTensorType>(dotOp.getA().getType());
+  return !aType.isUnsignedInteger() && !bType.isUnsignedInteger() &&
+         aTensorType.getShape().back() % 4 == 0;
+}
+
 class AccelerateBlocked : public OpRewritePattern<tt::DotOp> {
   StringRef arch;
 
@@ -666,9 +686,7 @@ public:
       if (types.a.isF16() && types.b.isF16() && types.c.isF32() &&
           types.d.isF32() && k % 2 == 0)
         return true;
-      if (types.a.isInteger(8) && !types.a.isUnsignedInteger() &&
-          types.b.isInteger(8) && !types.b.isUnsignedInteger() &&
-          types.c.isInteger(32) && types.d.isInteger(32) && k % 4 == 0)
+      if (supportsExactInt8Dot(dotOp, arch))
         return true;
     }
 
@@ -720,6 +738,9 @@ public:
                           dotOp.getD().getType().getElementType()};
     if (isLegalFMAForm(dotOp, types))
       return failure();
+    if (isInt8DotWithInt32Accumulator(dotOp))
+      return rewriter.notifyMatchFailure(
+          dotOp, "exact V_DOT lowering is unavailable for this INT8 dot");
     return legalizeFMA(dotOp, rewriter, types);
   }
 };
@@ -759,14 +780,30 @@ public:
     default:
       break;
     }
-    // Keep matrix-core patterns ahead of FMA, while allowing every AMD target
-    // to use vector-dot where it is legal and scalar FMA otherwise.
+    // Keep matrix-core patterns ahead of FMA. Exact V_DOT forms stay intact;
+    // unsupported INT8 integer accumulators are diagnosed below.
     patterns.add<AccelerateBlocked>(context, archGenerationName,
                                     /*benefit=*/1);
     if (applyPatternsAndFoldGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
+      return;
     }
     decomposeMixedModeDotOp(m);
+
+    bool unsupportedInt8Dot = false;
+    m.walk([&](tt::DotOp dotOp) {
+      if (!isa<ttg::BlockedEncodingAttr>(
+              dotOp.getD().getType().getEncoding()) ||
+          !isInt8DotWithInt32Accumulator(dotOp) ||
+          supportsExactInt8Dot(dotOp, archGenerationName))
+        return;
+      dotOp.emitError(
+          "INT8 dot with INT32 accumulator has no exact integer lowering on "
+          "this target; FP32 legalization is lossy");
+      unsupportedInt8Dot = true;
+    });
+    if (unsupportedInt8Dot)
+      signalPassFailure();
   }
 };
 
