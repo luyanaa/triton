@@ -55,7 +55,7 @@ getCtrlBitsForCacheModifierOnTarget(triton::CacheModifier cm, bool isBufferLoad,
 // Return true when the source-to-shared layout writes contiguous LDS chunks
 // for the requested vector width.
 bool canCoalesceWriteIntoSharedMemory(RankedTensorType srcTy,
-                                      triton::gpu::MemDescType dstTy,
+                                      triton::MemDescType dstTy,
                                       unsigned vectorSize);
 } // namespace mlir::LLVM::AMD
 

@@ -69,9 +69,10 @@ struct BufferEmitter {
   Value emitLoad(Type type, Value rsrcDesc, Value offset, Value pred,
                  Value falseVal);
 
-  // Emit a predicated raw buffer load directly into LDS.
-  void emitLoadToLds(Type type, Value byteWidth, Value rsrcDesc, Value offset,
-                     Value dst, Value pred, triton::CacheModifier cm);
+  // Emit a predicated buffer load into registers, then store the result into
+  // LDS.
+  void emitLoadToLds(Type type, Value rsrcDesc, Value offset, Value dst,
+                     Value pred, triton::CacheModifier cm);
 
   // Emit a predicated rocdl.raw.ptr.buffer.store
   void emitStore(Value rsrcDesc, Value offset, Value data, Value pred);

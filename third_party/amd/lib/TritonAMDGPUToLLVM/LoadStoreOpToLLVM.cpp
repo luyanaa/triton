@@ -471,13 +471,11 @@ struct BufferLoadToLocalOpConversion
     setNumGeneratedGlobalLoads(op, numElems / vec, vecTy);
     Value rsrcDesc = bufferEmitter.createResourceDescriptor(
         adaptor.getPtr(), adaptor.getStride());
-    Value vecBytes = b.i32_val(vecBits / 8);
     for (size_t i = 0; i < shmemAddrs.size(); ++i) {
       size_t srcIdx = i * vec;
       Value pred = maskElems.empty() ? b.true_val() : maskElems[srcIdx];
-      bufferEmitter.emitLoadToLds(vecTy, vecBytes, rsrcDesc,
-                                  offsetElems[srcIdx], shmemAddrs[i], pred,
-                                  op.getCache());
+      bufferEmitter.emitLoadToLds(vecTy, rsrcDesc, offsetElems[srcIdx],
+                                  shmemAddrs[i], pred, op.getCache());
       if (!otherElems.empty()) {
         Value storeVal = packElementRangeIntoVector(
             rewriter, this->getTypeConverter(), loc, vecTy, otherElems, srcIdx);

@@ -95,17 +95,18 @@ Value BufferEmitter::emitLoad(Type type, Value rsrcDesc, Value offset,
   return data;
 }
 
-void BufferEmitter::emitLoadToLds(Type type, Value byteWidth, Value rsrcDesc,
-                                  Value offset, Value dst, Value pred,
+void BufferEmitter::emitLoadToLds(Type type, Value rsrcDesc, Value offset,
+                                  Value dst, Value pred,
                                   triton::CacheModifier cm) {
   SmallVector<Value, 6> commonArgs;
   fillCommonArgs(type, rsrcDesc, offset, pred, commonArgs, cm,
                  /*isBufferLoad=*/true);
-  rewriter.create<ROCDL::RawPtrBufferLoadLdsOp>(
-      loc, TypeRange{},
-      ValueRange{commonArgs[0], dst, byteWidth, commonArgs[1], int_val(32, 0),
-                 commonArgs[2], commonArgs[3]},
-      ArrayRef<NamedAttribute>());
+  // This backport's ROCDL dialect lacks RawPtrBufferLoadLdsOp.
+  Type bufferType = getBufferOpType(type);
+  Value data = rewriter.create<ROCDL::RawPtrBufferLoadOp>(
+      loc, bufferType, commonArgs, ArrayRef<NamedAttribute>());
+  data = bitcast(data, type);
+  llStore(rewriter, loc, dst, data, pred);
 }
 
 void BufferEmitter::emitStore(Value rsrcDesc, Value offset, Value data,

@@ -400,7 +400,7 @@ getCtrlBitsForCacheModifierOnTarget(triton::CacheModifier cm, bool isBufferLoad,
 }
 
 bool canCoalesceWriteIntoSharedMemory(RankedTensorType srcTy,
-                                      triton::gpu::MemDescType dstTy,
+                                      triton::MemDescType dstTy,
                                       unsigned vectorSize) {
   auto shape = srcTy.getShape();
   auto srcLayout = triton::gpu::toLinearLayout(shape, srcTy.getEncoding());
