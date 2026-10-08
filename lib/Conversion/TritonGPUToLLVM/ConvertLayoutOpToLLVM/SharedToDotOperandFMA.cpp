@@ -1,5 +1,6 @@
 #include <numeric>
 
+#include "../FMACompatibility.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -8,16 +9,13 @@ using ValueTable = std::map<std::pair<int, int>, Value>;
 using ::mlir::LLVM::delinearize;
 using ::mlir::LLVM::getSharedMemoryObjectFromStruct;
 using ::mlir::LLVM::getStridesFromShapeAndOrder;
-using ::mlir::LLVM::linearize;
+using ::mlir::triton::MemDescType;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
-using ::mlir::triton::gpu::expandMatrixOrderWithBatch;
-using ::mlir::triton::gpu::expandMatrixShapeWithBatch;
 using ::mlir::triton::gpu::getContigPerThread;
 using ::mlir::triton::gpu::getOrder;
 using ::mlir::triton::gpu::getShapePerCTA;
 using ::mlir::triton::gpu::getSizePerThread;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
-using ::mlir::triton::gpu::MemDescType;
 using ::mlir::triton::gpu::SharedEncodingAttr;
 
 Value getStructFromValueTable(ArrayRef<Value> vals,
@@ -96,7 +94,9 @@ void storeValuesInLinearVector(PatternRewriter &rewriter, Location loc,
     spatialIdx[dim.nonK] = nonKIdx;
     spatialIdx[vecDim] += elem;
 
-    unsigned linearIdx = linearize(spatialIdx, perThreadTileShape, opOrder);
+    unsigned linearIdx =
+        static_cast<unsigned>(mlir::triton::gpu::fma_compat::linearizeIndex(
+            spatialIdx, perThreadTileShape, opOrder));
     opValues[linearIdx] = extract_element(elemTy, vec, i32_val(elem));
   }
 }
@@ -226,31 +226,39 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
   dim.k = dotOpNo == 0 ? 2 : 1;
   dim.nonK = dotOpNo == 0 ? 1 : 2;
   auto opTensorTy = cast<MemDescType>(srcVal.getType());
-  auto opTensorShape = expandMatrixShapeWithBatch(opTensorTy.getShape());
+  auto opTensorShape =
+      mlir::triton::gpu::fma_compat::expandMatrixShapeWithBatch(
+          opTensorTy.getShape());
   auto sharedLayout = cast<SharedEncodingAttr>(opTensorTy.getEncoding());
 
-  auto opOrder = expandMatrixOrderWithBatch(dLayout.getOrder());
+  auto opOrder = mlir::triton::gpu::fma_compat::expandMatrixOrderWithBatch(
+      dLayout.getOrder());
 
   auto origSmem = getSharedMemoryObjectFromStruct(
       loc, llVal, typeConverter->convertType(opTensorTy.getElementType()),
       rewriter);
-  auto smem = getExpandedSharedMemoryObject(rewriter, loc, origSmem,
-                                            opTensorTy.getShape());
-  auto strides = smem.strides;
+  auto strides = origSmem.strides;
+  if (opTensorTy.getShape().size() == 2) {
+    auto shape = opTensorTy.getShape();
+    strides.insert(strides.begin(), i32_val(shape[0] * shape[1]));
+  }
   int B = opTensorShape[dim.batch];
   int K = opTensorShape[dim.k];
   int NonK = opTensorShape[dim.nonK];
 
   auto shapePerCTATile =
-      expandMatrixShapeWithBatch(ArrayRef(getShapePerCTATile(dLayout)));
+      mlir::triton::gpu::fma_compat::expandMatrixShapeWithBatch(
+          ArrayRef(getShapePerCTATile(dLayout)));
   shapePerCTATile[dim.k] = K;
   auto sizePerThread =
-      expandMatrixShapeWithBatch(ArrayRef(getSizePerThread(dLayout)));
+      mlir::triton::gpu::fma_compat::expandMatrixShapeWithBatch(
+          ArrayRef(getSizePerThread(dLayout)));
   sizePerThread[dim.k] = K;
   auto threadsPerWarp =
-      expandMatrixShapeWithBatch(ArrayRef(dLayout.getThreadsPerWarp()));
-  auto warpsPerCTA =
-      expandMatrixShapeWithBatch(ArrayRef(dLayout.getWarpsPerCTA()));
+      mlir::triton::gpu::fma_compat::expandMatrixShapeWithBatch(
+          ArrayRef(dLayout.getThreadsPerWarp()));
+  auto warpsPerCTA = mlir::triton::gpu::fma_compat::expandMatrixShapeWithBatch(
+      ArrayRef(dLayout.getWarpsPerCTA()));
 
   auto warpSize = i32_val(triton::gpu::getWarpSize(dLayout));
   auto laneId = urem(thread, warpSize);
@@ -272,9 +280,10 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
       add(nonKTileOffset, mul(warpIds[dim.nonK], i32_val(sizePerWarpNonK)));
 
   auto elemTy = typeConverter->convertType(opTensorTy.getElementType());
-  Type ptrTy = smem.base.getType();
+  Type ptrTy = origSmem.base.getType();
 
-  auto sharedOrder = expandMatrixOrderWithBatch(sharedLayout.getOrder());
+  auto sharedOrder = mlir::triton::gpu::fma_compat::expandMatrixOrderWithBatch(
+      sharedLayout.getOrder());
   // Compute contiguity of fastest dimension in shared layout.
   unsigned fastDim = sharedOrder[0];
   unsigned vectorSize = sizePerThread[fastDim];
@@ -318,12 +327,12 @@ Value loadFMAOp(Value srcVal, Value llVal, BlockedEncodingAttr dLayout,
   // non-constant part
   Value basePtr;
   if (swizzlePath) {
-    basePtr = smem.base;
+    basePtr = origSmem.base;
   } else {
     auto laneOffset = getUnswizzledFirstElemOffset(
         rewriter, loc, B, NonK, bTileOffset, nonKTileOffset, strides[dim.batch],
         strides[dim.nonK]);
-    basePtr = gep(ptrTy, elemTy, smem.base, laneOffset);
+    basePtr = gep(ptrTy, elemTy, origSmem.base, laneOffset);
   }
 
   // This loop nest iterates over all values loaded in one thread across batch,

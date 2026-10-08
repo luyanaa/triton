@@ -1,6 +1,8 @@
 #include "triton/Conversion/TritonGPUToLLVM/FMADotUtility.h"
+#include "../FMACompatibility.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
+#include <cstddef>
 #include <unordered_map>
 
 using namespace mlir;
@@ -48,7 +50,8 @@ ValueTableFMA getValueTableFromStructFMA(
   // SharedToDotOperandFMA packs the full per-thread tile in D-layout order.
   // Decode combined coordinates so K and non-K repetitions may interleave.
   for (unsigned index = 0; index < elements.size(); ++index) {
-    auto spatialIndex = LLVM::delinearize(index, perThreadShape, inRepOrder);
+    auto spatialIndex = mlir::triton::gpu::fma_compat::delinearizeIndex(
+        index, perThreadShape, inRepOrder);
     SmallVector<unsigned> repSpatialIndex(3);
     SmallVector<unsigned> inRepSpatialIndex(3);
     for (unsigned dim = 0; dim < 3; ++dim) {
@@ -76,13 +79,17 @@ LogicalResult parametricConvertFMADot(DotOp op, DotOp::Adaptor adaptor,
   auto dTensorType = cast<RankedTensorType>(op.getResult().getType());
 
   SmallVector<int64_t> aShapePerCTA =
-      expandMatrixShapeWithBatch(ArrayRef(getShapePerCTA(aTensorType)));
+      mlir::triton::gpu::fma_compat::expandMatrixShapeWithBatch(
+          ArrayRef(getShapePerCTA(aTensorType)));
   SmallVector<int64_t> dShapePerCTA =
-      expandMatrixShapeWithBatch(ArrayRef(getShapePerCTA(dTensorType)));
+      mlir::triton::gpu::fma_compat::expandMatrixShapeWithBatch(
+          ArrayRef(getShapePerCTA(dTensorType)));
 
   auto dLayout = cast<BlockedEncodingAttr>(dTensorType.getEncoding());
-  auto inRepOrder = expandMatrixOrderWithBatch(dLayout.getOrder());
-  auto repOrder = expandMatrixOrderWithBatch(dLayout.getRepOrder());
+  auto inRepOrder = mlir::triton::gpu::fma_compat::expandMatrixOrderWithBatch(
+      dLayout.getOrder());
+  // Blocked layout repetitions use the same order as in-tile elements.
+  ArrayRef<unsigned> repOrder = inRepOrder;
 
   SmallVector<Value> accumulators =
       unpackLLElements(loc, adaptor.getC(), rewriter);
@@ -93,8 +100,10 @@ LogicalResult parametricConvertFMADot(DotOp op, DotOp::Adaptor adaptor,
   const unsigned numElementsPerThread = product(sizePerThread);
   SmallVector<unsigned> shapePerCTATile =
       getShapePerCTATile(dLayout, dTensorType.getShape());
-  sizePerThread = expandMatrixShapeWithBatch(ArrayRef(sizePerThread));
-  shapePerCTATile = expandMatrixShapeWithBatch(ArrayRef(shapePerCTATile));
+  sizePerThread = mlir::triton::gpu::fma_compat::expandMatrixShapeWithBatch(
+      ArrayRef(sizePerThread));
+  shapePerCTATile = mlir::triton::gpu::fma_compat::expandMatrixShapeWithBatch(
+      ArrayRef(shapePerCTATile));
 
   const unsigned kSize = aShapePerCTA[2];
   SmallVector<unsigned> repetitions(3);
@@ -118,11 +127,13 @@ LogicalResult parametricConvertFMADot(DotOp op, DotOp::Adaptor adaptor,
           for (unsigned m = 0; m < sizePerThread[1]; ++m)
             for (unsigned n = 0; n < sizePerThread[2]; ++n) {
               SmallVector<unsigned> inRepIndex = {b, m, n};
-              unsigned linearInRepIndex =
-                  LLVM::linearize(inRepIndex, sizePerThread, inRepOrder);
+              unsigned linearInRepIndex = static_cast<unsigned>(
+                  mlir::triton::gpu::fma_compat::linearizeIndex(
+                      inRepIndex, sizePerThread, inRepOrder));
               SmallVector<unsigned> repIndex = {bRep, mRep, nRep};
-              unsigned linearRepIndex =
-                  LLVM::linearize(repIndex, repetitions, repOrder);
+              unsigned linearRepIndex = static_cast<unsigned>(
+                  mlir::triton::gpu::fma_compat::linearizeIndex(
+                      repIndex, repetitions, repOrder));
               unsigned accumulatorIndex =
                   linearInRepIndex + linearRepIndex * numElementsPerThread;
 
