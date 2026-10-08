@@ -1,5 +1,5 @@
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
-#include "TritonAMDGPUToLLVM/Utility.h"
+#include "TritonAMDGPUToLLVM/SharedMemoryUtility.h"
 #include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -171,7 +171,8 @@ static Value getBlockStride(Value offset) {
 static unsigned getBufferVectorSize(Value ptr, Value offset,
                                     tt::ModuleAxisInfoAnalysis &axisInfo) {
   auto offsetTy = cast<RankedTensorType>(offset.getType());
-  auto ptrTy = offsetTy.cloneWith(std::nullopt, ptr.getType());
+  auto ptrTy =
+      cast<RankedTensorType>(offsetTy.cloneWith(std::nullopt, ptr.getType()));
   auto order = ttg::getOrder(ptrTy.getEncoding());
   auto uniqueContig =
       ttg::getUniqueContigPerThread(ptrTy.getEncoding(), ptrTy.getShape());

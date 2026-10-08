@@ -2,6 +2,7 @@
 #define TRITON_CONVERSION_TRITONAMDGPU_TO_LLVM_UTILITY_H
 
 #include "TritonAMDGPUToLLVM/GCNAsmFormat.h"
+#include "TritonAMDGPUToLLVM/SharedMemoryUtility.h"
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
@@ -52,11 +53,6 @@ int32_t
 getCtrlBitsForCacheModifierOnTarget(triton::CacheModifier cm, bool isBufferLoad,
                                     const triton::AMD::TargetInfo &targetInfo);
 
-// Return true when the source-to-shared layout writes contiguous LDS chunks
-// for the requested vector width.
-bool canCoalesceWriteIntoSharedMemory(RankedTensorType srcTy,
-                                      triton::MemDescType dstTy,
-                                      unsigned vectorSize);
 } // namespace mlir::LLVM::AMD
 
 #endif
