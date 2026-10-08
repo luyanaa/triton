@@ -73,4 +73,7 @@ docs/sg_execution_times.rst
 *.swp
 
 # macOS
+
+# Deepwork session state
+.slim/deepwork/
 .DS_Store
