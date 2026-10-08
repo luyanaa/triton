@@ -503,10 +503,13 @@ struct TritonAMDGPUInsertInstructionSchedHints
         forOp->walk([&](Operation *op) {
           if (op->getParentOfType<scf::ForOp>() != forOp)
             return;
-          if (isa<triton::DotOp, triton::LoadOp, triton::amdgpu::BufferLoadOp,
-                  triton::amdgpu::BufferLoadToLocalOp, gpu::LocalLoadOp,
-                  gpu::LocalStoreOp, gpu::AsyncCopyGlobalToLocalOp>(op))
-            op->setAttr(triton::amdgpu::InstructionSchedLoopIdAttrName, loopId);
+          if (isa<triton::DotOp, triton::LoadOp,
+                  triton::amdgpu::BufferLoadOp,
+                  triton::amdgpu::BufferLoadToLocalOp,
+                  triton::gpu::LocalLoadOp, triton::gpu::LocalStoreOp,
+                  triton::gpu::AsyncCopyGlobalToLocalOp>(op))
+            op->setAttr(triton::amdgpu::InstructionSchedLoopIdAttrName,
+                        loopId);
         });
         rewriter.setInsertionPointAfter(dotOp);
         auto schedHint = rewriter.create<triton::amdgpu::InstructionSchedHint>(

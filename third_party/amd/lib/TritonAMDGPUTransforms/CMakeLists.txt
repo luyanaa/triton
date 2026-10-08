@@ -11,7 +11,12 @@ add_triton_library(TritonAMDGPUTransforms
   TritonAMDGPUIR
   TritonAMDGPUTransformsIncGen
   TritonGPUIR
+  LINK_LIBS PUBLIC
+  TritonAMDGPUToLLVM
+  TritonGPUTransforms
 )
 
 target_include_directories(TritonAMDGPUTransforms PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include)
 target_include_directories(TritonAMDGPUTransforms PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/../../include)
+target_include_directories(TritonAMDGPUTransforms
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)

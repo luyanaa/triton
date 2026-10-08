@@ -552,9 +552,9 @@ struct AsyncCopyGlobalToLocalOpConversion
     // This ROCDL revision lacks GlobalLoadLDSOp; use a regular global load
     // followed by an LDS store instead.
     auto emitLoadToLds = [&](Value src, Value dst) {
-      Value data = llLoad(rewriter, loc, src, vecTy, true_val(),
-                          rewriter.create<LLVM::UndefOp>(loc, vecTy), 0,
-                          op.getCache());
+      Value data =
+          llLoad(rewriter, loc, src, vecTy, true_val(),
+                 rewriter.create<LLVM::UndefOp>(loc, vecTy), 0, op.getCache());
       llStore(rewriter, loc, dst, data, true_val(), 0,
               triton::CacheModifier::NONE);
     };
@@ -616,8 +616,7 @@ struct AsyncWaitOpConversion : public ConvertOpToLLVMPattern<AsyncWaitOp> {
     unsigned highBits = (op.getNum() >> 4) << 14;
     unsigned waitValue = lowBits | highBits | ~0xC00Fu;
     rewriter.create<ROCDL::WaitcntOp>(op.getLoc(), waitValue);
-    rewriter.replaceOp(
-        op, LLVM::createConstantI32(op.getLoc(), rewriter, 0));
+    rewriter.replaceOp(op, LLVM::createConstantI32(op.getLoc(), rewriter, 0));
     return success();
   }
 
@@ -631,8 +630,7 @@ struct AsyncCommitGroupOpConversion
   LogicalResult
   matchAndRewrite(AsyncCommitGroupOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op,
-                       LLVM::createConstantI32(op.getLoc(), rewriter, 0));
+    rewriter.replaceOp(op, LLVM::createConstantI32(op.getLoc(), rewriter, 0));
     return success();
   }
 };
