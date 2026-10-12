@@ -425,6 +425,7 @@ type_canonicalisation_dict = {
     "bfloat16": "bf16",
     "float32": "fp32",
     "float64": "fp64",
+    "int4": "i4",
     "int8": "i8",
     "int16": "i16",
     "int32": "i32",

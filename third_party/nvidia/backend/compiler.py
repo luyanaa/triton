@@ -15,7 +15,26 @@ from pathlib import Path
 
 
 def min_dot_size(target: GPUTarget):
-    return lambda lhsType, rhsType: (16, 32, 16) if lhsType.is_int8() else (16, 16, 16)
+
+    def check_dot_compatibility(lhs_type, rhs_type) -> Tuple[int, int, int]:  # [m, n, k]
+        lhs_bitwidth = lhs_type.scalar.primitive_bitwidth
+        rhs_bitwidth = rhs_type.scalar.primitive_bitwidth
+        assert lhs_bitwidth == rhs_bitwidth, "lhs and rhs bitwidth must be the same"
+        # For small M/N the input we can still use tensorcores with padding. K
+        # has to cover the instruction tile, which is 256 / bitwidth.
+        if lhs_bitwidth == 8:
+            return (1, 1, 32)
+        elif lhs_bitwidth == 4:
+            # Turing int4 m8n8k32: native K-tile is 256 / 4 = 64.
+            return (1, 1, 64)
+        elif lhs_bitwidth == 64:
+            return (1, 1, 4)
+        elif lhs_bitwidth == 32:
+            return (1, 1, 8)
+        else:
+            return (1, 1, 16)
+
+    return check_dot_compatibility
 
 
 @functools.lru_cache()
@@ -238,6 +257,13 @@ class CUDABackend(BaseBackend):
                                                  opt.reg_dec_producer, opt.reg_inc_consumer)
             passes.ttgpuir.add_pipeline(pm, opt.num_stages)
             passes.ttgpuir.add_ws_lowering(pm, opt.num_consumer_groups)
+        elif capability // 10 == 7:
+            # Pre-Ampere (V100/sm70, T4/sm75): the same pipelining pass, without
+            # warp specialization and without cp.async -- MatmulLoopPipeline
+            # moves the loads through registers (ld.global -> st.shared) and
+            # lets Membar order the ring.
+            passes.ttgpuir.add_combine_tensor_select_and_if(pm)
+            passes.ttgpuir.add_pipeline(pm, opt.num_stages)
         passes.ttgpuir.add_prefetch(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, capability >= 80)
         passes.ttgpuir.add_remove_layout_conversions(pm)

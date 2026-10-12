@@ -70,10 +70,37 @@ struct DecomposeUnsupportedConversions
     : public mlir::triton::impl::DecomposeUnsupportedNVIDIAConversionsBase<
           DecomposeUnsupportedConversions> {
   void runOnOperation() override {
+    // FIXME [Dot LL]
+    // Remove the decomposeTensorCoreToDotLayoutConversion class entirely after
+    // we have enabled the new layout conversion for all the cases.
+    auto nvidiaShortCutFn = [&](RankedTensorType srcTy,
+                                RankedTensorType dstTy) {
+      auto nvidiaMma = dyn_cast<NvidiaMmaEncodingAttr>(srcTy.getEncoding());
+      // Turing reports isAmpere() (versionMajor == 2) but does not share
+      // Ampere's operand packing. The f16 fragments do (both targets use
+      // m16n8k8), so a register relabel is exact there. The s8/s4 ones do not:
+      // Turing's m8n8k16 / m8n8k32 read 4 / 8 K-adjacent elements out of each
+      // 32-bit word where Ampere's m16n8k32 reads a different set, and the
+      // dot-operand layout is shared between the two targets (kWidth =
+      // 32/bitwidth), so nothing upstream objects to the relabel. It then
+      // mispacks the operand, which has to go through shared memory instead,
+      // where SharedToDotOperandMMAv2 performs the Turing packing. Every other
+      // Turing value that carries an MMA layout on its way to a dot operand is
+      // a 32-bit accumulator holding packed s8/s4, so f16 is the only element
+      // type that may take the shortcut.
+      if (nvidiaMma && nvidiaMma.isTuring() && !srcTy.getElementType().isF16())
+        return false;
+      // Supported mma to dot conversion
+      if (nvidiaMma && nvidiaMma.isAmpere())
+        return true;
+      // No need to decompose if shared memory is not needed
+      return matchMmaV3AndDotOperandLayout(srcTy, dstTy) ||
+             cvtReordersRegisters(srcTy, dstTy);
+    };
     ModuleOp mod = getOperation();
     triton::gpu::decomposeSplatOpToSharedLayoutConversion(mod);
     triton::gpu::decomposeTensorCoreToDotLayoutConversion(mod,
-                                                          isMmaToDotShortcut);
+                                                          nvidiaShortCutFn);
     triton::gpu::decomposeBlockedToDotLayoutConversion(mod);
 
     mlir::RewritePatternSet patterns(&getContext());

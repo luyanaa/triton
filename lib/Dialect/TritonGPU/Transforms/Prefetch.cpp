@@ -1,5 +1,8 @@
 //===----------------------------------------------------------------------===//
 //
+// The packed-operand guard on the dot split is derived from triton-turing
+// (MIT) -- see THIRD_PARTY_NOTICES.md.
+//
 // This pass tries to prefetch operands (a and b) of tt.dot.
 // Those ConvertLayoutOps will be lowered to shared memory loads.
 //
@@ -248,8 +251,37 @@ LogicalResult Prefetcher::initialize() {
       Value bSmem = bVals.front();
       Value aHeaderDef = getIncomingOp(aSmem);
       Value bHeaderDef = getIncomingOp(bSmem);
+      // A buffer whose elements are *wider* than the dot operand's means the
+      // operand is packed: the int4 path keeps eight i4 per i32 in shared
+      // memory and reinterprets at the register level, so its memdesc is 8x
+      // narrower than the dot operand in element count and a slice sized in
+      // operand elements runs past the end of the allocation (MemDescSubviewOp
+      // rejects that outright). A buffer of *narrower* elements is a promoted
+      // operand -- fp8 read as f16 -- and the slice stays inside the tile.
+      auto sliceable = [](Value smem, Value dotOperand) {
+        auto memTy = dyn_cast<triton::MemDescType>(smem.getType());
+        auto operandTy = dyn_cast<RankedTensorType>(dotOperand.getType());
+        if (!memTy || !operandTy)
+          return false;
+        Type memElem = memTy.getElementType();
+        Type operandElem = operandTy.getElementType();
+        if (!memElem.isIntOrFloat() || !operandElem.isIntOrFloat())
+          return false;
+        return memElem.getIntOrFloatBitWidth() <=
+               operandElem.getIntOrFloatBitWidth();
+      };
+      // A single slot is refilled in the iteration the prefetch would read the
+      // next tile's head out of, so only multi-slot rings may be prefetched.
+      auto isMultiSlotView = [](Value v) {
+        auto memTy = dyn_cast<triton::MemDescType>(v.getType());
+        return memTy && memTy.getShape().size() > 0 && memTy.getShape()[0] >= 2;
+      };
       // Only prefetch loop arg
       if (aHeaderDef && bHeaderDef) {
+        if (!isMultiSlotView(aSmem) || !isMultiSlotView(bSmem) ||
+            !sliceable(aSmem, dot.getA()) ||
+            !sliceable(bSmem, dot.getB()))
+          continue;
         dots.insert(dot);
         dot2aVals[dot] = aVals;
         dot2bVals[dot] = bVals;

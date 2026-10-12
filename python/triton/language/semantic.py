@@ -657,6 +657,24 @@ def reshape(input: tl.tensor, dst_shape: List[int], can_reorder: bool, builder: 
     return tl.tensor(builder.create_reshape(input.handle, dst_shape, can_reorder), ret_ty)
 
 
+def reinterpret_as_int4(input: tl.tensor, axis: int, builder: ir.builder) -> tl.tensor:
+    src_ty = input.type
+    if not src_ty.is_block():
+        raise ValueError("reinterpret_as_int4 expects a tensor")
+    if src_ty.scalar != tl.int32:
+        raise ValueError(f"reinterpret_as_int4 expects an int32 tensor, got {src_ty.scalar}")
+    rank = len(input.shape)
+    axis = axis if axis >= 0 else axis + rank
+    if axis < 0 or axis >= rank:
+        raise ValueError(f"reinterpret_as_int4 axis {axis} out of range for rank {rank}")
+    # Each int32 unpacks to 8 int4 along the `axis` (K) dimension.
+    dst_shape = [tl._unwrap_if_constexpr(x) for x in input.shape]
+    dst_shape[axis] = dst_shape[axis] * 8
+    ret_ty = tl.block_type(tl.int4, dst_shape)
+    return tl.tensor(
+        builder.create_reinterpret_as_int4(input.handle, ret_ty.to_ir(builder), axis), ret_ty)
+
+
 def expand_dims(input: tl.tensor, axis: int, builder: ir.builder) -> tl.tensor:
     dst_shape = [tl._constexpr_to_value(x) for x in input.shape]
     dst_shape.insert(axis, 1)
@@ -1463,9 +1481,9 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optiona
         # All combinations of supported fp8 x fp8 are permitted
         pass
     else:
-        assert lhs.dtype in (tl.int8, tl.uint8, tl.float16, tl.bfloat16,
+        assert lhs.dtype in (tl.int4, tl.int8, tl.uint8, tl.float16, tl.bfloat16,
                              tl.float32), f"Unsupported lhs dtype {lhs.dtype}"
-        assert rhs.dtype in (tl.int8, tl.uint8, tl.float16, tl.bfloat16,
+        assert rhs.dtype in (tl.int4, tl.int8, tl.uint8, tl.float16, tl.bfloat16,
                              tl.float32), f"Unsupported rhs dtype {rhs.dtype}"
         assert lhs.dtype == rhs.dtype, f"Both operands must be same dtype. Got {lhs.dtype} and {rhs.dtype}"
 
@@ -1489,7 +1507,7 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optiona
         and rhs.shape[-1].value >= min_dot_size[1], \
             f"Input shapes should have M >= {min_dot_size[0]}, N >= {min_dot_size[1]} and K >= {min_dot_size[2]}"
     if lhs.type.scalar.is_int():
-        assert lhs.type.scalar == tl.int8, "only int8 supported!"
+        assert lhs.type.scalar in (tl.int8, tl.int4), "only int8/int4 supported!"
         _0 = builder.get_int32(0)
         ret_scalar_ty = tl.int32
     elif out_dtype.is_bf16():
@@ -1527,33 +1545,48 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optiona
                      ret_ty)
 
 
-def _str_to_fp_type(float_format: Optional[str]):
-    if float_format == 'e4m3':
-        return ir.F8F6F4TY.E4M3
-    if float_format == 'e5m2':
-        return ir.F8F6F4TY.E5M2
-    if float_format == 'e2m3':
-        return ir.F8F6F4TY.E2M3
-    if float_format == 'e3m2':
-        return ir.F8F6F4TY.E3M2
-    if float_format == 'e2m1':
-        return ir.F8F6F4TY.E2M1
-    raise ValueError(f"Invalid float format: {float_format}.")
+def _str_to_fp_type(float_format: str):
+    ty_enum = getattr(ir.ScaleDotElemTypeTY, float_format.upper(), None)
+    if ty_enum is None:
+        raise ValueError(f"Invalid float format: {float_format}.")
+    return ty_enum
 
 
-def dot_scaled(lhs: tl.tensor, lhs_scale: tl.tensor, lhs_format, rhs: tl.tensor, rhs_scale: Optional[tl.tensor],
-               rhs_format, acc: tl.tensor | None, out_dtype: tl.dtype, builder: ir.builder) -> tl.tensor:
+def _bitcast_to_fp_type(val: tl.tensor, float_format: str, builder: ir.builder):
+    """
+    If float_format is subbyte, make sure it's packed as uint8 and return it.
+    Otherwise, return a tensor (perhaps bitcasting) of the specified float format.
+    """
+    triton_ty = {"e5m2": tl.float8e5, "e4m3": tl.float8e4nv, "bf16": tl.bfloat16}.get(float_format)
+    if triton_ty is None:
+        assert float_format == "e2m1", f"Internal Error: Unexpected float format: {float_format}"
+        assert val.dtype == tl.uint8, f"e2m1 format must be packed as uint8. Got {val.dtype}"
+        return val
+    if val.dtype == triton_ty:
+        return val
+    else:
+        unsigned_ty = {"e5m2": tl.uint8, "e4m3": tl.uint8, "bf16": tl.uint16}[float_format]
+        assert val.dtype == unsigned_ty, f"Unexpected dtype for {float_format}. Got {val.dtype}"
+        return bitcast(val, triton_ty, builder)
+
+
+def dot_scaled(lhs: tl.tensor, lhs_scale: tl.tensor, lhs_format: str, rhs: tl.tensor, rhs_scale: Optional[tl.tensor],
+               rhs_format: str, acc: tl.tensor | None, out_dtype: tl.dtype, builder: ir.builder) -> tl.tensor:
     assert lhs.type.is_block() and rhs.type.is_block()
     #TODO: validate types.
     lhs_rank = len(lhs.shape)
     rhs_rank = len(rhs.shape)
     assert lhs_rank == rhs_rank == 2 or lhs_rank == rhs_rank == 3, f"Both inputs must be either 2D or 3D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
+    lhs_format: str = lhs_format.value
+    rhs_format: str = rhs_format.value
     lhs_format_enum = _str_to_fp_type(lhs_format)
     rhs_format_enum = _str_to_fp_type(rhs_format)
     assert lhs_format in ("e2m1", "e4m3", "e5m2"), f"NYI: lhs_format {lhs_format}"
-    assert rhs_format in ("e4m3", "e5m2"), f"NYI: rhs_format {rhs_format}"
+    assert rhs_format in ("e4m3", "e5m2", "bf16"), f"NYI: rhs_format {rhs_format}"
     rhs_scale_is_none = isinstance(rhs_scale, tl.constexpr) and rhs_scale.value is None
     assert rhs_scale_is_none, "NYI: rhs_scale not supported"
+    lhs = _bitcast_to_fp_type(lhs, lhs_format, builder)
+    rhs = _bitcast_to_fp_type(rhs, rhs_format, builder)
 
     M = lhs.type.shape[-2]
     K, N = rhs.type.shape[-2:]

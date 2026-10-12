@@ -1,3 +1,6 @@
+// The pre-Ampere MMA element-type gate, the int4 operand interception and the
+// bf16 mixed-mode promotion are derived from triton-turing (MIT) -- see
+// THIRD_PARTY_NOTICES.md.
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Types.h"
@@ -22,6 +25,30 @@ namespace gpu {
 
 namespace {
 
+static bool isFp8Type(Type t) {
+  return t.isFloat8E5M2() || t.isFloat8E4M3FN() || t.isFloat8E4M3FNUZ() ||
+         t.isFloat8E5M2FNUZ();
+}
+
+// Element types the pre-Ampere `mma.sync` instruction set has a form for:
+// f16 (m16n8k8), s8 (m8n8k16) and s4 (m8n8k32). fp8 is admitted because
+// decomposeMixedModeDotOp promotes it to f16 below sm89, which is supported.
+//
+// supportMMA() carries Ampere's and later's rules only, so on Turing it admits
+// bf16, tf32 and f64 dots as well. Those keep an MMA layout and then reach
+// MMAv2, whose Turing instruction table has no row for them: getMmaType() maps
+// bf16 to FP32_BF16_BF16_F32 and an f32 tf32 dot to FP32_TF32_TF32_FP32, and
+// `mmaInstructions.at(mmaType)` aborts on the missing key. Refusing the layout
+// here sends those dots to FMA, which is what a target without a tensor-core
+// form would do.
+static bool isSupportedByTuringMMA(Type aElemTy, Type bElemTy) {
+  if (isFp8Type(aElemTy) && isFp8Type(bElemTy))
+    return true;
+  if (aElemTy != bElemTy)
+    return false;
+  return aElemTy.isF16() || aElemTy.isInteger(8) || aElemTy.isInteger(4);
+}
+
 // Get the highest version supported for the hardware and the dot.
 static int getMMAVersionSafe(int computeCapability, DotOp op) {
   // List supported mma version in order of preference.
@@ -36,8 +63,16 @@ static int getMMAVersionSafe(int computeCapability, DotOp op) {
     assert(false && "computeCapability not supported");
   }
   for (int baseVersion : versionsSupported) {
-    if (supportMMA(op, baseVersion))
+    if (supportMMA(op, baseVersion)) {
+      // Pre-Ampere targets have a smaller instruction set than supportMMA()
+      // encodes; the version-2 path below is the Turing one when
+      // computeCapability == 75 (see createMMAEncodingForDot).
+      if (computeCapability < 80 && baseVersion >= 2 &&
+          !isSupportedByTuringMMA(op.getA().getType().getElementType(),
+                                  op.getB().getType().getElementType()))
+        continue;
       return baseVersion;
+    }
     if (baseVersion == 3)
       op.emitRemark() << "Warning: can't use MMA V3 for the dot op";
   }
@@ -131,6 +166,58 @@ warpsPerTileV3(DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps,
   return ret;
 }
 
+// Give a dot operand its dot-operand layout, at the bitwidth the instruction
+// actually consumes.
+//
+// int4 is special: the operand is `tt.reinterpret_as_int4(%packed_i32)` and the
+// i4 tensor cannot take a dot-operand layout directly. That would need a
+// blocked -> dot_op convert_layout on i4, which routes through shared memory,
+// and an i4 local_alloc is illegal (the shared element width must be a multiple
+// of 8 bits). Instead apply the dot-operand layout to the int32 SOURCE
+// (kWidth = 1, legal for 32 bits) and re-create the reinterpret on top, so the
+// i4 tensor only ever exists in dot-operand form (kWidth = 8). The reinterpret
+// is a pure register relabel: 4x i32 == 32x i4 == 128 bits per thread.
+static Value convertDotOperandForMMA(Value v, int opIdx, int bitwidth,
+                                     RankedTensorType newRetType,
+                                     mlir::PatternRewriter &rewriter) {
+  // The operand may be wrapped in convert_layout ops inserted while giving the
+  // reinterpret result a dot-operand encoding; look through them to the
+  // reinterpret.
+  Value reintVal = v;
+  while (auto cvt = reintVal.getDefiningOp<ConvertLayoutOp>())
+    reintVal = cvt.getSrc();
+  if (auto reint = reintVal.getDefiningOp<triton::ReinterpretAsInt4Op>()) {
+    Value packed = reint.getSrc();
+    auto packedType = cast<RankedTensorType>(packed.getType());
+    auto i32Type = rewriter.getIntegerType(32);
+    auto i4Type = rewriter.getIntegerType(4);
+    // int32 dot-operand encoding (kWidth derives to 1).
+    auto i32Encoding = DotOperandEncodingAttr::get(
+        v.getContext(), opIdx, newRetType.getEncoding(), i32Type);
+    auto i32DotType = RankedTensorType::get(
+        packedType.getShape(), packedType.getElementType(), i32Encoding);
+    Value i32Dot =
+        rewriter.create<ConvertLayoutOp>(packed.getLoc(), i32DotType, packed);
+    // int4 dot-operand encoding (kWidth derives to 8); the shape is the
+    // unpacked i4 shape the reinterpret result carries.
+    auto i4Encoding = DotOperandEncodingAttr::get(
+        v.getContext(), opIdx, newRetType.getEncoding(), i4Type);
+    auto reintTy = cast<RankedTensorType>(reint.getType());
+    auto i4DotType = RankedTensorType::get(reintTy.getShape(),
+                                          reintTy.getElementType(), i4Encoding);
+    return rewriter.create<triton::ReinterpretAsInt4Op>(
+        reint.getLoc(), i4DotType, i32Dot, reint.getAxis());
+  }
+  auto minType = bitwidth > 0 ? rewriter.getIntegerType(bitwidth) : v.getType();
+  auto vType = cast<RankedTensorType>(v.getType());
+  auto newVEncoding = DotOperandEncodingAttr::get(
+      v.getContext(), opIdx, newRetType.getEncoding(),
+      bitwidth > 0 ? minType : vType.getElementType());
+  auto newVType = RankedTensorType::get(vType.getShape(),
+                                        vType.getElementType(), newVEncoding);
+  return rewriter.create<ConvertLayoutOp>(v.getLoc(), newVType, v);
+}
+
 // Returns a shared memory allocation that can be used by a dotMMA op for the
 // given value.
 static Value getSharedMemoryMMAOperand(Value v, mlir::PatternRewriter &rewriter,
@@ -189,7 +276,7 @@ class BlockedToMMA : public mlir::OpRewritePattern<DotOp> {
   // elements distribution to the order of higher precision primitives. As a
   // result, kwidth can be the bitwidth of the lower precision primitive.
   // Conversely, in the downcasting scenario, no reordering is performed,
-  // making it directory use the lower precision primitive.
+  // making it directly use the lower precision primitive.
   static int computeOrigBitWidth(Value x) {
     int finalBitWidth = getElementTypeOrSelf(x).getIntOrFloatBitWidth();
     int origBitWidth = finalBitWidth;
@@ -323,21 +410,10 @@ public:
       // convert operands
       int minBitwidth =
           std::min(computeOrigBitWidth(a), computeOrigBitWidth(b));
-      Type minType = rewriter.getIntegerType(minBitwidth);
-      // convert A operand
-      auto newAEncoding = DotOperandEncodingAttr::get(
-          oldAType.getContext(), 0, newRetType.getEncoding(),
-          minBitwidth > 0 ? minType : oldAType.getElementType());
-      auto newAType = RankedTensorType::get(
-          oldAType.getShape(), oldAType.getElementType(), newAEncoding);
-      a = rewriter.create<ConvertLayoutOp>(a.getLoc(), newAType, a);
-      // convert B operand
-      auto newBEncoding = DotOperandEncodingAttr::get(
-          oldBType.getContext(), 1, newRetType.getEncoding(),
-          minBitwidth > 0 ? minType : oldBType.getElementType());
-      auto newBType = RankedTensorType::get(
-          oldBType.getShape(), oldBType.getElementType(), newBEncoding);
-      b = rewriter.create<ConvertLayoutOp>(b.getLoc(), newBType, b);
+      a = convertDotOperandForMMA(a, /*opIdx=*/0, minBitwidth, newRetType,
+                                  rewriter);
+      b = convertDotOperandForMMA(b, /*opIdx=*/1, minBitwidth, newRetType,
+                                  rewriter);
       newDot = taskIdRewriter.create<DotOp>(dotOp.getLoc(), newRetType, a, b,
                                             newAcc, dotOp.getInputPrecision(),
                                             dotOp.getMaxNumImpreciseAcc());
@@ -352,9 +428,28 @@ public:
 
 static Value promoteOperand(OpBuilder &builder, Location loc, Value operand,
                             Type promotedType) {
-  Type tensorPromotedType = cast<RankedTensorType>(operand.getType())
+  auto tensorPromotedType = cast<RankedTensorType>(operand.getType())
                                 .cloneWith(std::nullopt, promotedType);
-  return builder.create<FpToFpOp>(loc, tensorPromotedType, operand);
+  Type operandElType =
+      cast<RankedTensorType>(operand.getType()).getElementType();
+  if (operandElType == promotedType)
+    return operand;
+  if (isFp8Type(operandElType))
+    return builder.create<FpToFpOp>(loc, tensorPromotedType, operand);
+  // bf16 -> f16 is not an extf (same width) and the NVIDIA lowering tables have
+  // no direct entry, so it goes through f32 like semantic.py routes every
+  // bf16 <-> f16 cast. Widening conversions are plain extf: a `fp_to_fp` here
+  // would have to name a rounding mode and the lowering rejects the pairs it
+  // has no entry for (bf16 -> f32 among them).
+  if (operandElType.isBF16() && promotedType.isF16()) {
+    Type f32TensorType = cast<RankedTensorType>(operand.getType())
+                             .cloneWith(std::nullopt, builder.getF32Type());
+    Value asF32 = builder.create<arith::ExtFOp>(loc, f32TensorType, operand);
+    return builder.create<FpToFpOp>(
+        loc, tensorPromotedType, asF32,
+        RoundingModeAttr::get(builder.getContext(), RoundingMode::RTNE));
+  }
+  return builder.create<arith::ExtFOp>(loc, tensorPromotedType, operand);
 }
 
 // promote operands of dot op if the existing combination is not natively
@@ -422,22 +517,12 @@ public:
     auto aType = dotOp.getLhsType();
     auto bType = dotOp.getRhsType();
 
-    auto enumToType = [&rewriter](F8F6F4Type type) {
-      switch (type) {
-      case F8F6F4Type::E4M3:
-        return rewriter.getFloat8E4M3FNType();
-      case F8F6F4Type::E5M2:
-        return rewriter.getFloat8E5M2Type();
-      default:
-        llvm_unreachable("unexpected type");
-      }
-    };
-
-    assert((aType == F8F6F4Type::E4M3 || aType == F8F6F4Type::E5M2 ||
-            aType == F8F6F4Type::E2M1) &&
+    assert((aType == ScaleDotElemType::E4M3 ||
+            aType == ScaleDotElemType::E5M2 ||
+            aType == ScaleDotElemType::E2M1) &&
            "NYI: lhs supports fp4 or fp8");
-    assert(bType == F8F6F4Type::E4M3 ||
-           bType == F8F6F4Type::E5M2 && "NYI: rhs supports fp8");
+    assert(bType == ScaleDotElemType::E4M3 || bType == ScaleDotElemType::E5M2 ||
+           bType == ScaleDotElemType::BF16 && "NYI: rhs supports fp8 and bf16");
 
     // TODO run accelerate matmul on A and B first to choose their layouts
     // Set return type
@@ -461,11 +546,12 @@ public:
     auto newAcc =
         rewriter.create<ConvertLayoutOp>(oldAcc.getLoc(), newRetType, oldAcc);
 
-    auto toMMABf16 = [&newRetType, &rewriter, &ctx, &enumToType](
-                         TypedValue<RankedTensorType> v, int idx,
-                         F8F6F4Type type) -> TypedValue<RankedTensorType> {
+    auto toMMABf16 =
+        [&newRetType, &rewriter,
+         &ctx](TypedValue<RankedTensorType> v, int idx,
+               ScaleDotElemType type) -> TypedValue<RankedTensorType> {
       auto vType = v.getType();
-      if (type == F8F6F4Type::E2M1) {
+      if (type == ScaleDotElemType::E2M1) {
         // A bit too dynamically typed...
         // perhaps return ints in both cases?
 
@@ -476,23 +562,23 @@ public:
             vType.getShape(), vType.getElementType(), newVEncoding);
         return rewriter.create<ConvertLayoutOp>(v.getLoc(), newVType, v);
       } else {
-        assert(type == F8F6F4Type::E5M2 || type == F8F6F4Type::E4M3);
+        assert(type == ScaleDotElemType::E5M2 ||
+               type == ScaleDotElemType::E4M3 ||
+               type == ScaleDotElemType::BF16);
         auto newVEncoding = DotOperandEncodingAttr::get(
             ctx, idx, newRetType.getEncoding(), /*kWidth=*/8);
         auto newVType = RankedTensorType::get(
             vType.getShape(), vType.getElementType(), newVEncoding);
         v = rewriter.create<ConvertLayoutOp>(v.getLoc(), newVType, v);
 
-        // Bitcast
-        auto vTypeFp8 = RankedTensorType::get(vType.getShape(),
-                                              enumToType(type), newVEncoding);
-        v = cast<TypedValue<RankedTensorType>>(
-            rewriter.create<BitcastOp>(v.getLoc(), vTypeFp8, v).getResult());
-
-        // Convert to bf16
-        auto vTypeBf16 = RankedTensorType::get(
-            vType.getShape(), rewriter.getBF16Type(), newVEncoding);
-        return rewriter.create<FpToFpOp>(v.getLoc(), vTypeBf16, v);
+        if (type == ScaleDotElemType::BF16) {
+          return v;
+        } else {
+          // Convert to bf16
+          auto vTypeBf16 = RankedTensorType::get(
+              vType.getShape(), rewriter.getBF16Type(), newVEncoding);
+          return rewriter.create<FpToFpOp>(v.getLoc(), vTypeBf16, v);
+        }
       }
     };
     a = toMMABf16(a, 0, aType);
@@ -522,11 +608,11 @@ public:
     auto newScaleEncoding = triton::gpu::BlockedEncodingAttr::get(
         ctx, {1, 1}, threadsPerWarp, warpsPerCTA, {1, 0}, CTALayout);
 
-    auto newScaleType = RankedTensorType::get(scale.getType().getShape(),
-                                              scale.getType().getElementType(),
-                                              newScaleEncoding);
-    scale =
-        rewriter.create<ConvertLayoutOp>(scale.getLoc(), newScaleType, scale);
+    auto newScaleDotElemType = RankedTensorType::get(
+        scale.getType().getShape(), scale.getType().getElementType(),
+        newScaleEncoding);
+    scale = rewriter.create<ConvertLayoutOp>(scale.getLoc(),
+                                             newScaleDotElemType, scale);
 
     auto scaledA = rewriter.create<triton::gpu::UpcastMXFPOp>(
         dotOp.getLoc(), a, scale, dotOp.getLhsType());

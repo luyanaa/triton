@@ -31,18 +31,8 @@ module attributes {"triton_gpu.target" = "hip:gfx942", "triton_gpu.num-ctas" = 1
 }
 // -----
 
-#blocked = #triton_gpu.blocked<{sizePerThread = [1, 4], threadsPerWarp = [1, 64], warpsPerCTA = [1, 4], order = [1, 0]}>
-#shared = #triton_gpu.shared<{vec = 4, perPhase = 1, maxPhase = 1, order = [1, 0], hasLeadingOffset = false}>
-#dot = #triton_gpu.dot_op<{opIdx = 0, parent = #blocked}>
-module attributes {"triton_gpu.target" = "hip:gfx942", "triton_gpu.num-ctas" = 1 : i32, "triton_gpu.num-warps" = 4 : i32, "triton_gpu.threads-per-warp" = 64 : i32} {
-  // CHECK-LABEL: @fma_shared_k_tail
-  // CHECK-NOT: llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
-  // CHECK: llvm.load {{.*}} : !llvm.ptr<3> -> vector<2xf32>
-  // CHECK-NOT: llvm.load {{.*}} : !llvm.ptr<3> -> vector<4xf32>
-  tt.func public @fma_shared_k_tail(
-      %arg0: !tt.memdesc<1x10xf32, #shared, #triton_gpu.shared_memory>)
-      -> tensor<1x10xf32, #dot> {
-    %0 = triton_gpu.local_load %arg0 : !tt.memdesc<1x10xf32, #shared, #triton_gpu.shared_memory> -> tensor<1x10xf32, #dot>
-    tt.return %0 : tensor<1x10xf32, #dot>
-  }
-}
+// A K-tail case (K not a multiple of the vector width) cannot be written as
+// literal IR: Triton requires a tensor's element count to be a power of two, so
+// a 1x10 operand is rejected by the verifier before any lowering runs. The
+// narrow-vector path this case was after is exercised from the frontend with a
+// masked load instead.

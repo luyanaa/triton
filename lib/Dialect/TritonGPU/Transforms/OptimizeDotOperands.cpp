@@ -45,11 +45,11 @@ public:
           triton::gpu::getCTALayout(transTy.getEncoding()),
           transTy.getElementType());
       auto sharedMemorySpace = SharedMemorySpaceAttr::get(getContext());
-      auto sharedTy =
-          MemDescType::get(transTy.getShape(), transTy.getElementType(),
-                           sharedEnc, sharedMemorySpace);
-      auto alloc = rewriter.create<LocalAllocOp>(trans.getLoc(), sharedTy,
-                                                 trans.getResult());
+      auto sharedTy = MemDescType::get(
+          transTy.getShape(), transTy.getElementType(), sharedEnc,
+          sharedMemorySpace);
+      auto alloc = rewriter.create<LocalAllocOp>(
+          trans.getLoc(), sharedTy, trans.getResult());
       auto load =
           rewriter.create<LocalLoadOp>(cvtOp.getLoc(), sharedLoadTy, alloc);
       // Replace only the conversion; `trans` may have other tensor users.
@@ -319,6 +319,41 @@ struct MMAV3UseRegOperand
   }
 };
 
+// SM75's register-to-dot shortcut does not pack generated INT8 MMA operands
+// in the K order expected by MMAv2. Materialize this case in shared memory so
+// SharedToDotOperandMMAv2 performs the required packing.
+class MaterializeTuringInt8MmaOperand
+    : public OpRewritePattern<ConvertLayoutOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ConvertLayoutOp cvt,
+                                PatternRewriter &rewriter) const override {
+    auto srcTy = cast<RankedTensorType>(cvt.getSrc().getType());
+    auto dstTy = cast<RankedTensorType>(cvt.getType());
+    auto mmaEnc = dyn_cast<NvidiaMmaEncodingAttr>(srcTy.getEncoding());
+    auto dotEnc = dyn_cast<DotOperandEncodingAttr>(dstTy.getEncoding());
+    if (!mmaEnc || !mmaEnc.isTuring() || !dotEnc || dotEnc.getOpIdx() != 0 ||
+        dotEnc.getParent() != mmaEnc ||
+        !srcTy.getElementType().isInteger(8))
+      return failure();
+
+    auto sharedEnc = SharedEncodingAttr::get(
+        getContext(), dotEnc, srcTy.getShape(),
+        /*order=*/getOrder(srcTy.getEncoding()),
+        triton::gpu::getCTALayout(srcTy.getEncoding()),
+        srcTy.getElementType());
+    auto sharedMemorySpace = SharedMemorySpaceAttr::get(getContext());
+    auto sharedTy = MemDescType::get(srcTy.getShape(), srcTy.getElementType(),
+                                     sharedEnc, sharedMemorySpace);
+    auto alloc = rewriter.create<LocalAllocOp>(cvt.getLoc(), sharedTy,
+                                                cvt.getSrc());
+    auto load = rewriter.create<LocalLoadOp>(cvt.getLoc(), dstTy, alloc);
+    rewriter.replaceOp(cvt, load.getResult());
+    return success();
+  }
+};
+
 } // namespace
 
 #define GEN_PASS_DEF_TRITONGPUOPTIMIZEDOTOPERANDS
@@ -337,9 +372,10 @@ public:
 
     mlir::PassManager pm(m.getContext());
     pm.addPass(mlir::createCanonicalizerPass());
-    auto ret = pm.run(m);
+    [[maybe_unused]] auto ret = pm.run(m);
 
     mlir::RewritePatternSet patterns(context);
+    patterns.add<MaterializeTuringInt8MmaOperand>(context);
     patterns.add<SwizzleShmemConvert>(context);
     if (this->hoistLayoutConversion.getValue())
       patterns.add<HoistLayoutConversion>(context);

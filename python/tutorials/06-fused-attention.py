@@ -488,6 +488,21 @@ class _attention(torch.autograd.Function):
         PRE_BLOCK = 128
         NUM_WARPS, NUM_STAGES = 4, 5
         BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32
+        if is_cuda() and torch.cuda.get_device_capability() == (7, 5):
+            # Turing: 64KB shared memory per CTA (Ampere+: >= 100KB). At
+            # HEAD_DIM=128 the upstream block sizes need ~80KB, so halve the
+            # K/V (resp. Q) row blocks to fit. A 2-stage pipeline still fits at
+            # the halved sizes and beats single-buffer by ~11% -- the softmax-
+            # gradient dependency chain exposes latency the pipeline hides (the
+            # same mechanism as the forward). HEAD_DIM <= 64 keeps the upstream
+            # blocks with the same 2-stage pipeline.
+            if ctx.HEAD_DIM > 64:
+                BLOCK_N1, BLOCK_M2 = 64, 64
+            NUM_STAGES = 2
+        # Both halves of the kernel index off BLOCK_N1 (dK/dV start at
+        # pid * BLOCK_N1, dQ at pid * BLOCK_M2) while the grid is sized by
+        # BLOCK_N1, so a smaller BLOCK_M2 would leave the tail of dQ unwritten.
+        assert BLOCK_N1 == BLOCK_M2
         BLK_SLICE_FACTOR = 2
         RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
         arg_k = k

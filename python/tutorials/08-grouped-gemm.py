@@ -32,33 +32,81 @@ import triton
 import triton.language as tl
 
 
+def num_sms():
+    """SM count of the active device; the persistent grid is sized off it."""
+    return torch.cuda.get_device_properties("cuda").multi_processor_count
+
+
+def get_turing_grouped_config():
+    # Turing (sm75). The gain over the default list is almost entirely
+    # num_stages.
+    #
+    # The default list sets no num_stages at all, so every entry runs at
+    # triton.Config's default of 3. On a 128x128x32 tile that is 49152 B of
+    # shared memory, over the 32 KB that lets two CTAs share an SM.
+    #
+    # Three stages used to lose on that alone, and no longer does: with two or
+    # more ring slots a k-tile costs one bar.sync instead of two. Pinning the
+    # config and rotating, s3 beats s2 by 7.4% at N=512, 16.5% at 1024 and
+    # 12.9% at 2048 with one CTA per SM, and by 7.6% / 1.6% / 0.9% with two.
+    #
+    # NUM_SM matters too, and it is not the SM count: it is how many CTAs the
+    # persistent loop launches, and one per SM is far too few (a 4-warp CTA
+    # occupies an eighth of a Turing SM's 32 warps, so a lone resident CTA
+    # cannot cover its own memory latency). At N=1024 the same tile runs 48.1
+    # TFLOPS at 72 CTAs and 69.5 at 144, so the list carries 2x the SM count.
+    #
+    # The inner loop loads with no mask ("assume full tile for now"), so the
+    # 128x256 tile that won the sweep at N>=1024 is not offered: a block size
+    # that does not divide the problem dimension reads out of bounds.
+    sizes = [
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 1, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 2, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 3, 'num_warps': 4},
+    ]
+    return [
+        triton.Config(
+            {k: v for k, v in s.items() if k.startswith('BLOCK')}
+            | {'NUM_SM': n},
+            num_stages=s['num_stages'], num_warps=s['num_warps'])
+        for s in sizes
+        for n in (num_sms(), 2 * num_sms())
+    ]
+
+
+def get_grouped_autotune_config():
+    if torch.cuda.get_device_capability() == (7, 5):
+        return get_turing_grouped_config()
+    return [
+        triton.Config({
+            'BLOCK_SIZE_M': 128,
+            'BLOCK_SIZE_N': 128,
+            'BLOCK_SIZE_K': 32,
+            'NUM_SM': 84,
+        }),
+        triton.Config({
+            'BLOCK_SIZE_M': 128,
+            'BLOCK_SIZE_N': 128,
+            'BLOCK_SIZE_K': 32,
+            'NUM_SM': 128,
+        }),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 64,
+            'BLOCK_SIZE_K': 32,
+            'NUM_SM': 84,
+        }),
+        triton.Config({
+            'BLOCK_SIZE_M': 64,
+            'BLOCK_SIZE_N': 64,
+            'BLOCK_SIZE_K': 32,
+            'NUM_SM': 128,
+        }),
+    ]
+
+
 @triton.autotune(
-    configs=[
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 128,
-            'BLOCK_SIZE_N': 128,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 128,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 84,
-        }),
-        triton.Config({
-            'BLOCK_SIZE_M': 64,
-            'BLOCK_SIZE_N': 64,
-            'BLOCK_SIZE_K': 32,
-            'NUM_SM': 128,
-        }),
-    ],
+    configs=get_grouped_autotune_config(),
     key=['group_size'],
 )
 @triton.jit

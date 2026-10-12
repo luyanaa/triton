@@ -1,4 +1,7 @@
+// The synchronous-copy pipeline for pre-Ampere targets is derived from
+// triton-turing (MIT) -- see THIRD_PARTY_NOTICES.md.
 #include "mlir/Analysis/SliceAnalysis.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/TypeUtilities.h"
@@ -6,6 +9,7 @@
 #include "mlir/Support/LLVM.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Analysis/Utility.h"
+#include "triton/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
@@ -151,6 +155,82 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
     }
   }
   loadOp.erase();
+}
+
+// Pre-Ampere targets have no cp.async, so the pipeline moves a load through
+// registers (ld.global -> st.shared) instead of through an async copy, and
+// leaves the CTA barriers that order the ring to the Membar pass, which sees a
+// plain shared-memory RAW/WAR pair per iteration. This covers Volta (sm70) and
+// Turing (sm75) -- cp.async starts at sm80.
+static bool useSyncCopy(scf::ForOp forOp) {
+  ModuleOp mod = forOp->getParentOfType<ModuleOp>();
+  auto targetAttr = mod->getAttrOfType<StringAttr>(tt::AttrTargetName);
+  // Lit tests run without a target attribute; treat those as "not pre-Ampere".
+  if (!targetAttr || !targetAttr.getValue().starts_with("cuda:"))
+    return false;
+  return getNVIDIAComputeCapability(mod) < 80;
+}
+
+// Multi-buffer a load through shared memory without cp.async.
+//
+// Unlike the async path the global load is NOT erased: the local_store consumes
+// its result and the pipeline still needs the load in the stage it was
+// assigned. Only the other users -- the consumer side -- are redirected to a
+// local_load of the extract slot.
+static void createSyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
+                           Value insertIdx, Value extractIdx,
+                           tt::CoarseSchedule &schedule,
+                           tt::CoarseSchedule::Cluster prefetchCluster,
+                           llvm::MapVector<Operation *, LoadInfo> &loadToInfo,
+                           int numStages) {
+  OpBuilder builder(forOp);
+  Location loc = loadOp.getLoc();
+  Value zero = builder.create<arith::ConstantIntOp>(loc, 0, 32);
+  auto allocTy = cast<tt::MemDescType>(alloc.getType());
+  Attribute sharedMemorySpace =
+      triton::gpu::SharedMemorySpaceAttr::get(forOp.getContext());
+  tt::MemDescType subviewTy = tt::MemDescType::get(
+      allocTy.getShape().drop_front(), allocTy.getElementType(),
+      allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
+  auto [stage, cluster] = schedule[loadOp];
+
+  // Producer side: st.shared into the insert slot. The store inherits the
+  // load's stage and cluster, so it stays behind the global load in program
+  // order and the ring distance between insert and extract is what the
+  // analysis computed.
+  builder.setInsertionPointAfter(loadOp);
+  SmallVector<Value> storeOffsets(allocTy.getRank(), zero);
+  storeOffsets[0] = insertIdx;
+  auto storeView = builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc,
+                                                         storeOffsets);
+  auto store =
+      builder.create<ttg::LocalStoreOp>(loc, loadOp.getResult(), storeView);
+  schedule.insert(store, stage, cluster);
+
+  // Consumer side: read the extract slot.
+  SmallVector<Value> loadOffsets(allocTy.getRank(), zero);
+  loadOffsets[0] = extractIdx;
+  auto viewLoad =
+      builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
+  auto sharedLoad =
+      builder.create<ttg::LocalLoadOp>(loc, loadOp.getType(), viewLoad);
+  Value result = sharedLoad;
+  Value other = loadOp.getOther();
+  if (other && !isZeroConst(other)) {
+    Value mask = loadOp.getMask();
+    result = builder.create<arith::SelectOp>(loc, loadOp.getType(), mask,
+                                             sharedLoad.getResult(), other);
+  }
+  loadOp.getResult().replaceUsesWithIf(result, [&](OpOperand &use) {
+    return use.getOwner() != store.getOperation();
+  });
+
+  // Prefetch the extract side like the async path does when the load feeds a
+  // dot: this is what lets the prefetch pass hoist the first K-slice ahead of
+  // the dot.
+  if (loadToInfo[loadOp].usedByDot) {
+    schedule.insert(viewLoad, numStages - 2, prefetchCluster);
+  }
 }
 
 static void createTMAAsyncCopy(
@@ -514,6 +594,145 @@ assignMemoryLayouts(llvm::SmallVector<std::tuple<Operation *, int, Operation *>>
   }
 
   return loadToInfo;
+}
+
+// Shared memory the loop already commits to besides the pipeline ring:
+// local_allocs that live across the loop (defined inside it, or defined outside
+// with users inside). Buffers the pipeline itself creates are not visible here
+// yet, which is correct -- they are the ones being sized.
+static int64_t staticSharedBytes(scf::ForOp forOp) {
+  int64_t bytes = 0;
+  Operation *scope = forOp->getParentOfType<ModuleOp>();
+  if (!scope)
+    return 0;
+  scope->walk([&](ttg::LocalAllocOp alloc) {
+    bool liveInLoop =
+        forOp->isAncestor(alloc) ||
+        llvm::any_of(alloc->getUsers(),
+                     [&](Operation *user) { return forOp->isAncestor(user); });
+    if (!liveInLoop)
+      return;
+    auto ty = alloc.getType();
+    int64_t elems = 1;
+    for (int64_t d : ty.getShape())
+      elems *= d;
+    bytes += elems * (ty.getElementType().getIntOrFloatBitWidth() + 7) / 8;
+  });
+  return bytes;
+}
+
+// Pre-Ampere targets have 64 KB (Turing) or 96 KB (Volta) of shared memory per
+// CTA and no cp.async, so every staged load costs one buffer slot per stage of
+// depth. A num_stages that does not fit has to be lowered here, before the
+// schedule is built from it: past the device's budget the kernel does not fail
+// to compile, it fails to launch (OutOfResources), and nothing else in the
+// kernel depends on how deep the ring is.
+static int clampNumStagesForSharedMemory(scf::ForOp forOp, int numStages) {
+  ModuleOp mod = forOp->getParentOfType<ModuleOp>();
+  auto targetAttr = mod->getAttrOfType<StringAttr>(tt::AttrTargetName);
+  if (!targetAttr || !targetAttr.getValue().starts_with("cuda:"))
+    return numStages;
+  int capability = getNVIDIAComputeCapability(mod);
+  if (capability >= 80)
+    return numStages;
+  // Per-CTA budget: Volta and Xavier have 96 KB, Turing 64 KB.
+  int64_t budget = (capability <= 72 ? 96 : 64) * 1024;
+  int64_t staticBytes = staticSharedBytes(forOp);
+
+  // One ring slot per staged load.
+  int64_t perStage = 0;
+  for (auto &entry : loadOpsToIndirectionLevelAndUse(forOp)) {
+    Operation *loadOp = std::get<0>(entry);
+    auto tensorTy = dyn_cast<RankedTensorType>(loadOp->getResult(0).getType());
+    if (!tensorTy)
+      continue;
+    perStage += product(tensorTy.getShape()) *
+                ((tensorTy.getElementType().getIntOrFloatBitWidth() + 7) / 8);
+  }
+  if (perStage == 0)
+    return numStages;
+
+  int clamped = numStages;
+  while (clamped > 1 && perStage * (clamped - 1) > budget - staticBytes)
+    --clamped;
+  if (clamped != numStages)
+    forOp->emitRemark()
+        << "pipeline depth reduced from " << numStages << " to " << clamped
+        << ": one buffer slot per staged load is " << perStage
+        << " B, " << staticBytes << " B of the " << budget
+        << " B per-CTA budget is already committed to other allocations, and a "
+           "ring of depth d needs d slots";
+  return clamped;
+}
+
+// A synchronous-copy ring with two or more slots needs one bar.sync per
+// iteration, not the two a blind hazard analysis asks for:
+//
+//   * Within an iteration every read of a ring slot is scheduled before every
+//     store that refills it (MatmulLoopPipeline never writes a slot before the
+//     consumer of the previous tile has read it), so one barrier placed between
+//     the last read and the first write satisfies WAR.
+//   * Across iterations the slot written in iteration i is read in iteration
+//     i + d, d >= 2 being the ring depth, so the barrier of iteration i + 1 --
+//     or of any iteration in between -- sits between that write and its read.
+//     A single-slot ring (d == 1) refills the slot every iteration and needs a
+//     second barrier; those are left to the Membar analysis.
+//
+// The barrier is scheduled at the producer's stage and cluster so that the
+// expander stamps it into every prologue copy as well, and the stores are marked
+// with kPipelineRingStoreAttrName so the Membar analysis -- which cannot see the
+// slot indices -- does not add the loop-head barrier back for the store ->
+// next-iteration-read pair. Placing the barrier in front of the stores (rather
+// than after the reads) also leaves the whole dot between the reads and the
+// barrier, which is what lets ptxas spread the ldmatrix over the mma stream.
+static void
+placeSyncBarriers(scf::ForOp forOp, tt::CoarseSchedule &schedule,
+                  const llvm::MapVector<Operation *, LoadInfo> &loadToInfo) {
+  int ringDepth = 0;
+  for (auto &[loadOp, info] : loadToInfo)
+    ringDepth = std::max(ringDepth, info.distToUse);
+  if (ringDepth < 2)
+    return;
+
+  SmallVector<Operation *> reads, writes;
+  for (Operation &op : forOp.getBody()->without_terminator()) {
+    if (isa<ttg::LocalStoreOp>(&op))
+      writes.push_back(&op);
+    else if (isa<ttg::LocalLoadOp>(&op))
+      reads.push_back(&op);
+  }
+  if (reads.empty() || writes.empty())
+    return;
+
+  // An op that is not in the schedule has no order against the others.
+  SmallVector<Operation *> traffic(reads);
+  traffic.append(writes);
+  if (llvm::any_of(traffic, [&](Operation *op) {
+        return schedule.count(op) == 0;
+      }))
+    return;
+
+  auto clusterOf = [&](Operation *op) { return *schedule[op].second; };
+  for (Operation *read : reads)
+    for (Operation *write : writes)
+      if (clusterOf(read) >= clusterOf(write))
+        return;
+
+  int producerStage = schedule[writes.front()].first;
+  Operation *firstWrite = writes.front();
+  for (Operation *write : writes) {
+    producerStage = std::min(producerStage, schedule[write].first);
+    if (clusterOf(write) < clusterOf(firstWrite))
+      firstWrite = write;
+  }
+
+  for (Operation *write : writes)
+    write->setAttr(ttg::kPipelineRingStoreAttrName,
+                   UnitAttr::get(forOp.getContext()));
+  OpBuilder builder(firstWrite);
+  auto barrier = builder.create<mlir::gpu::BarrierOp>(firstWrite->getLoc());
+  schedule.insert(barrier.getOperation(), producerStage,
+                  schedule[firstWrite].second);
 }
 
 static llvm::MapVector<Operation *, LoadInfo>
@@ -1024,10 +1243,15 @@ createAsyncOps(scf::ForOp &forOp, tt::CoarseSchedule &schedule,
   // is OK.
   tt::CoarseSchedule::Cluster prefetchCluster = schedule.clusters.newAtBack();
 
+  bool syncCopy = useSyncCopy(forOp);
   for (AsyncLoad &asyncLoad : asyncLoads) {
     if (auto loadOp = dyn_cast<tt::LoadOp>(asyncLoad.loadOp)) {
-      createAsyncCopy(forOp, loadOp, asyncLoad.alloc, insertIdx, extractIdx,
-                      schedule, prefetchCluster, loadToInfo, numStages);
+      if (syncCopy)
+        createSyncCopy(forOp, loadOp, asyncLoad.alloc, insertIdx, extractIdx,
+                       schedule, prefetchCluster, loadToInfo, numStages);
+      else
+        createAsyncCopy(forOp, loadOp, asyncLoad.alloc, insertIdx, extractIdx,
+                        schedule, prefetchCluster, loadToInfo, numStages);
     } else {
       auto descLoad = cast<tt::ExperimentalDescriptorLoadOp>(asyncLoad.loadOp);
       createTMAAsyncCopy(forOp, descLoad, asyncLoad.alloc, insertIdx,
@@ -1066,6 +1290,11 @@ static void invalidateBarriers(OpBuilder &builder,
 
 bool mlir::triton::preProcessLoopAndGetSchedule(
     scf::ForOp &forOp, int numStages, mlir::triton::PipeliningOption &options) {
+  // The ring depth is derived from numStages, so a clamp has to happen before
+  // anything is built from it.
+  numStages = clampNumStagesForSharedMemory(forOp, numStages);
+  if (numStages < 2)
+    return false;
   // Schedule the loads and root ops (dot ops) in the loop. This will give us
   // a scaffold for the final schedule.
   DenseSet<Operation *> rootUsers;
@@ -1110,6 +1339,8 @@ bool mlir::triton::preProcessLoopAndGetSchedule(
   });
 
   scheduleRemainingToLastStage(forOp, coarseSchedule, afterPrologue, numStages);
+  if (useSyncCopy(forOp))
+    placeSyncBarriers(forOp, coarseSchedule, loadToInfo);
   LLVM_DEBUG({
     LDBG("Final coarse schedule:");
     coarseSchedule.dump();
@@ -1132,10 +1363,12 @@ bool mlir::triton::preProcessLoopAndGetSchedule(
   options.annotateFn = [](Operation *op,
                           mlir::triton::PipeliningOption::PipelinerPart part,
                           unsigned iteration) {};
-  // Insert a wait 0 after the loop
+  // Insert a wait 0 after the loop. The sync-copy path has no async copies to
+  // wait for, and `cp.async.wait_group` does not exist before sm80.
   OpBuilder builder(forOp);
   builder.setInsertionPointAfter(forOp);
-  builder.create<ttg::AsyncWaitOp>(forOp.getLoc(), ValueRange({}), 0);
+  if (!useSyncCopy(forOp))
+    builder.create<ttg::AsyncWaitOp>(forOp.getLoc(), ValueRange({}), 0);
   // Invalidate any mbarrier create
   invalidateBarriers(builder, barriers);
   // Explicitly deallocate allocated tensors after the wait op

@@ -1,5 +1,6 @@
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -33,6 +34,11 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
                                      Value pred) {
   OpBuilder::InsertionGuard guard(rewriter);
   if (mlir::isMemoryEffectFree(op))
+    return op;
+  // A barrier must execute uniformly across the CTA, so it cannot be masked
+  // off; running it in stages that are predicated away is safe, and the sync
+  // copy pipeline relies on that (`placeSyncBarriers`).
+  if (isa<mlir::gpu::BarrierOp>(op))
     return op;
   if (isa<ttg::AsyncCommitGroupOp, ttg::AsyncWaitOp>(op))
     return op;

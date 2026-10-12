@@ -343,6 +343,9 @@ SharedMemoryObject getSharedMemoryObjectFromStruct(Location loc,
 SmallVector<Value> delinearize(RewriterBase &rewriter, Location loc,
                                Value linear, ArrayRef<unsigned> shape,
                                ArrayRef<unsigned> order);
+SmallVector<unsigned> delinearize(unsigned linear, ArrayRef<unsigned> shape,
+                                  ArrayRef<unsigned> order);
+
 
 SmallVector<Value> delinearize(RewriterBase &rewriter, Location loc,
                                unsigned linear, ArrayRef<unsigned> shape);
@@ -355,9 +358,21 @@ Value linearize(RewriterBase &rewriter, Location loc, ArrayRef<Value> multiDim,
 
 Value linearize(RewriterBase &rewriter, Location loc, ArrayRef<Value> multiDim,
                 ArrayRef<unsigned> shape);
+size_t linearize(ArrayRef<unsigned> multiDim, ArrayRef<unsigned> shape,
+                 ArrayRef<unsigned> order);
+
 
 Value addStringToModule(Location loc, RewriterBase &rewriter, StringRef key,
                         StringRef content);
+/// Extend 2d shared object to 3d.
+///
+/// If tensor has 3 dimensions, returns original shared object.
+/// If tensor shape is [M, N], return shared object describing shape [1, M, N]
+SharedMemoryObject
+getExpandedSharedMemoryObject(ConversionPatternRewriter &rewriter, Location loc,
+                              SharedMemoryObject smemObj,
+                              ArrayRef<int64_t> shape);
+
 
 // Given an elemId which represents the index of an element from the list of
 // elements that are in the thread's registers (i.e. total of
@@ -409,6 +424,19 @@ inline Value getSharedMemoryBase(Location loc, RewriterBase &rewriter,
   Value base = gep(ptrTy, i8_ty, LLVM::getStackPointer(rewriter, func), offVal);
   return base;
 }
+
+// -----------------------------------------------------------------------
+// MXFP utilities
+// -----------------------------------------------------------------------
+
+// Convert each value, which is an int8 containing 2 packed mxfp4 values,
+// into 2 standalone bf16 values
+SmallVector<Value> convertMxfp4x2ToBf16x2(RewriterBase &rewriter, Location loc,
+                                          ArrayRef<Value> values);
+
+// Scale a mxfp4 value by a given scale.
+Value mxfpScaleBf16(RewriterBase &rewriter, Location loc, Value v, Value scale);
+
 } // namespace LLVM
 
 /* ------------------------------------ */
@@ -471,15 +499,16 @@ emitBaseIndexWithinCTAForBlockedLayout(Location loc, RewriterBase &rewriter,
   auto sizePerThread = blockedLayout.getSizePerThread();
   auto threadsPerWarp = blockedLayout.getThreadsPerWarp();
   auto warpsPerCTA = blockedLayout.getWarpsPerCTA();
-  auto order = blockedLayout.getOrder();
+  auto threadOrder = blockedLayout.getThreadOrder();
+  auto warpOrder = blockedLayout.getWarpOrder();
   auto shapePerCTA = triton::gpu::getShapePerCTA(blockedLayout, shape);
   unsigned rank = shape.size();
 
   // delinearize threadId to get the base index
   SmallVector<Value> multiDimWarpId =
-      delinearize(rewriter, loc, warpId, warpsPerCTA, order);
+      delinearize(rewriter, loc, warpId, warpsPerCTA, warpOrder);
   SmallVector<Value> multiDimThreadId =
-      delinearize(rewriter, loc, laneId, threadsPerWarp, order);
+      delinearize(rewriter, loc, laneId, threadsPerWarp, threadOrder);
 
   SmallVector<Value> multiDimBase(rank);
   for (unsigned k = 0; k < rank; ++k) {

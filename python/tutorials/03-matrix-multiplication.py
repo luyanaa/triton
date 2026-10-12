@@ -202,6 +202,59 @@ def get_cuda_autotune_config():
     ]
 
 
+def get_turing_autotune_config():
+    # Turing (sm75): 64KB shared memory per CTA and a synchronous-copy
+    # pipeline (no cp.async), so the Ampere-oriented configs above mostly
+    # exceed the budget: (BM + BN) * BK * 2B * num_stages <= 64KB. Every
+    # config with a >= 128x128 tile gets pruned there, leaving only small
+    # tiles with poor compute/memory ratios. This space keeps tiles large
+    # and stages shallow instead, and includes deep-K single-stage points
+    # (the cudaTensorCoreGemm design: amortize the two CTA barriers over a
+    # deeper chunk; with >= 2 shared-memory slots a k-tile costs one bar.sync
+    # instead, which is what makes the s3 entries competitive).
+    sizes = [
+        # large tiles. num_stages=1 (no pipeline) and num_stages=3 (two
+        # shared-memory slots) trade places with problem size on the 128x128
+        # tile: s1 wins at 2048, s3 at 4096. num_stages=2 has a single slot, so
+        # it keeps two barriers per k-tile and never wins on large tiles; it
+        # stays for latency-exposed shapes. The 128x256 s3 w8 point (cuBLAS's
+        # own tile shape) is the fastest large-square config from 2048 up.
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 1, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 2, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 3, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 2, 'num_warps': 8},
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'num_stages': 2, 'num_warps': 8},
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'num_stages': 3, 'num_warps': 8},
+        {'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 2, 'num_warps': 8},
+        # deeper K, fewer stages
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'num_stages': 1, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'num_stages': 1, 'num_warps': 8},
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'num_stages': 2, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'num_stages': 2, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'num_stages': 3, 'num_warps': 4},
+        # medium tiles, mid-depth pipeline
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'num_stages': 3, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 3, 'num_warps': 4},
+        # medium tiles, no pipeline: an exhaustive sweep of BM/BN/BK x stages x
+        # warps found these two beat every entry above at M=N=K=1024, by 3.7%
+        # and 6.4%. Below ~2048 the pipeline is a net cost on medium tiles too,
+        # not just on the 128x128 ones; larger shapes are unaffected.
+        {'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'num_stages': 1, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'num_stages': 1, 'num_warps': 4},
+        # small matrices
+        {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'num_stages': 2, 'num_warps': 4},
+        {'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'num_stages': 2, 'num_warps': 2},
+        {'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'num_stages': 2, 'num_warps': 2},
+    ]
+    return [
+        triton.Config(
+            {k: v for k, v in s.items() if k.startswith('BLOCK')}
+            | {'GROUP_SIZE_M': 8},
+            num_stages=s['num_stages'],
+            num_warps=s['num_warps']) for s in sizes
+    ]
+
+
 def get_hip_autotune_config():
     return [
         triton.Config(
@@ -224,6 +277,8 @@ def get_hip_autotune_config():
 
 def get_autotune_config():
     if is_cuda():
+        if torch.cuda.get_device_capability() == (7, 5):
+            return get_turing_autotune_config()
         return get_cuda_autotune_config()
     else:
         return get_hip_autotune_config()

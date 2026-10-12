@@ -332,7 +332,14 @@ struct FpToFpOpConversion
 
   static Value convertBf16ToFp32(Location loc,
                                  ConversionPatternRewriter &rewriter,
-                                 const Value &v) {
+                                 const Value &v, int computeCapability) {
+    if (computeCapability < 80) {
+      // cvt.f32.bf16 is sm80+. bf16 is the top half of an f32 -- same sign,
+      // same exponent -- so the conversion is the bit pattern moved into place.
+      // That is exact for every value, subnormals, infinities and NaNs
+      // included, involves no rounding mode and never touches the FPU.
+      return bitcast(shl(zext(i32_ty, bitcast(v, i16_ty)), i32_val(16)), f32_ty);
+    }
     PTXBuilder builder;
     auto &cvt = *builder.create("cvt.f32.bf16");
     auto res = builder.newOperand("=r");
@@ -354,7 +361,38 @@ struct FpToFpOpConversion
 
   static Value convertFp32ToBf16(Location loc,
                                  ConversionPatternRewriter &rewriter,
-                                 const Value &v, const RoundingMode rounding) {
+                                 const Value &v, const RoundingMode rounding,
+                                 int computeCapability) {
+    if (computeCapability < 80) {
+      // cvt.rn.bf16.f32 and cvt.rz.bf16.f32 are both sm80+, so on pre-Ampere
+      // targets the conversion is integer arithmetic:
+      //
+      //  * RTZ is truncation. bf16 keeps the f32 sign and exponent, and the
+      //    format is sign-magnitude, so discarding the low 16 bits always moves
+      //    the magnitude toward zero. Zeros, normals, subnormals and infinities
+      //    all come out right.
+      //  * RTNE adds half an ulp of the bf16 mantissa -- 0x7fff plus the bit
+      //    being rounded away, which is what breaks ties to even -- before
+      //    truncating.
+      //
+      // Both are exact integer ops, so FTZ does not touch them. A NaN whose
+      // payload lives entirely in the discarded bits (0x7f800001, say) would
+      // truncate to an infinity; emit a quiet NaN instead, the same fallback
+      // CUDA's pre-sm80 __internal_float2bfloat16 uses. PTX does not pin down
+      // which NaN payload cvt produces either, so the class is what matters.
+      Value bits = bitcast(v, i32_ty);
+      Value absBits = and_(bits, i32_val(0x7fffffff));
+      Value isNaN = icmp_ugt(absBits, i32_val(0x7f800000));
+      Value rounded;
+      if (rounding == RoundingMode::RTNE) {
+        Value lsb = and_(lshr(bits, i32_val(16)), i32_val(1));
+        rounded = lshr(add(bits, add(i32_val(0x7fff), lsb)), i32_val(16));
+      } else {
+        rounded = lshr(bits, i32_val(16));
+      }
+      Value hi = trunc(i16_ty, rounded);
+      return bitcast(select(isNaN, i16_val(0x7fff), hi), bf16_ty);
+    }
     PTXBuilder builder;
     StringRef ptx;
     switch (rounding) {
@@ -498,7 +536,8 @@ struct FpToFpOpConversion
       SmallVector<Value> outVals;
       for (Value v : operands[0]) {
         outVals.push_back(
-            convertFp32ToBf16(loc, rewriter, v, roundingMode.value()));
+            convertFp32ToBf16(loc, rewriter, v, roundingMode.value(),
+                              computeCapability));
       }
       return outVals;
     }
@@ -714,8 +753,13 @@ struct FPToSIOpConversion
 struct ExtFOpConversion
     : ElementwiseOpConversionBase<arith::ExtFOp, ExtFOpConversion> {
   using Base = ElementwiseOpConversionBase<arith::ExtFOp, ExtFOpConversion>;
-  using Base::Base;
   using Adaptor = typename Base::OpAdaptor;
+
+  ExtFOpConversion(LLVMTypeConverter &typeConverter,
+                   ModuleAxisInfoAnalysis &axisAnalysisPass,
+                   int computeCapability, PatternBenefit benefit)
+      : Base(typeConverter, axisAnalysisPass, benefit),
+        computeCapability(computeCapability) {}
 
   SmallVector<Value> createDestOps(arith::ExtFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -725,19 +769,28 @@ struct ExtFOpConversion
     if (inElemTy.isBF16()) {
       auto outElemTy = getElementType(op.getOut());
       assert(outElemTy.isF32() && "unsupported conversion");
-      return {
-          FpToFpOpConversion::convertBf16ToFp32(loc, rewriter, operands[0][0])};
+      return {FpToFpOpConversion::convertBf16ToFp32(loc, rewriter,
+                                                   operands[0][0],
+                                                   computeCapability)};
     } else {
       return {rewriter.create<LLVM::FPExtOp>(loc, elemTy, operands[0][0])};
     }
   }
+
+private:
+  int computeCapability;
 };
 
 struct TruncFOpConversion
     : ElementwiseOpConversionBase<arith::TruncFOp, TruncFOpConversion> {
   using Base = ElementwiseOpConversionBase<arith::TruncFOp, TruncFOpConversion>;
-  using Base::Base;
   using Adaptor = typename Base::OpAdaptor;
+
+  TruncFOpConversion(LLVMTypeConverter &typeConverter,
+                     ModuleAxisInfoAnalysis &axisAnalysisPass,
+                     int computeCapability, PatternBenefit benefit)
+      : Base(typeConverter, axisAnalysisPass, benefit),
+        computeCapability(computeCapability) {}
 
   SmallVector<Value> createDestOps(arith::TruncFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -749,11 +802,15 @@ struct TruncFOpConversion
       assert(inElemTy.isF32() && "unsupported conversion");
       return {// Trunc uses the default rounding mode: RTNE
               FpToFpOpConversion::convertFp32ToBf16(
-                  loc, rewriter, operands[0][0], RoundingMode::RTNE)};
+                  loc, rewriter, operands[0][0], RoundingMode::RTNE,
+                  computeCapability)};
     } else {
       return {rewriter.create<LLVM::FPTruncOp>(loc, elemTy, operands[0][0])};
     }
   }
+
+private:
+  int computeCapability;
 };
 
 struct ExpOpConversionApprox
@@ -943,8 +1000,10 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
   patterns.add<FAddOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<FMulOpConversion>(typeConverter, axisInfoAnalysis, benefit);
 
-  patterns.add<ExtFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<TruncFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<ExtFOpConversion>(typeConverter, axisInfoAnalysis,
+                                 computeCapability, benefit);
+  patterns.add<TruncFOpConversion>(typeConverter, axisInfoAnalysis,
+                                   computeCapability, benefit);
   patterns.add<FPToSIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
 
   patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis,

@@ -140,6 +140,7 @@ struct ConvertTritonGPUToLLVM
     mlir::triton::NVIDIA::populateTMAToLLVMPatterns(typeConverter, targetInfo,
                                                     patterns, benefit);
     populateDotOpToLLVMPatterns(typeConverter, patterns, benefit);
+    populateReinterpretAsInt4OpToLLVMPatterns(typeConverter, patterns, benefit);
     populateElementwiseOpToLLVMPatterns(typeConverter, patterns,
                                         axisInfoAnalysis, computeCapability,
                                         targetInfo, benefit);
@@ -284,6 +285,22 @@ bool NVIDIA::canSkipBarSync(Operation *before, Operation *after) {
           triton::nvidia_gpu::WaitBarrierOp>(before) &&
       !isa<triton::nvidia_gpu::InvalBarrierOp>(after))
     return true;
+
+  // Ring stores of a synchronous-copy pipeline (see
+  // MatmulLoopPipeline::placeSyncBarriers). The pipeliner placed exactly one
+  // bar.sync per iteration between the ring's reads and its writes, and that
+  // barrier orders such a store against the next iterations' reads and against
+  // its sibling stores; the ring distance is >= 2 slots, so no read can observe
+  // a half-written slot either. The analysis cannot see the slot indices, so
+  // without this it re-inserts the loop-head barrier and the pipeline loses the
+  // advantage it was built for.
+  if (auto store = dyn_cast<triton::gpu::LocalStoreOp>(before);
+      store && store->hasAttr(triton::gpu::kPipelineRingStoreAttrName)) {
+    if (isa<triton::gpu::LocalLoadOp>(after))
+      return true;
+    if (auto other = dyn_cast<triton::gpu::LocalStoreOp>(after))
+      return other->hasAttr(triton::gpu::kPipelineRingStoreAttrName);
+  }
 
   return false;
 }

@@ -70,6 +70,15 @@ Type TritonGPUToLLVMTypeConverter::convertTritonPointerType(
   return LLVM::LLVMPointerType::get(ctx, type.getAddressSpace());
 }
 
+// Element type of the struct field that holds one element of `type` in
+// registers.
+//
+// Volta's MMAv1 fragments are the one layout still addressed as packed 32-bit
+// registers: SharedToDotOperandMMAv1 packs two 16-bit operands per register and
+// DotOpToLLVM/MMAv1 unpacks them the same way, and neither was part of the move
+// to one element per thread slot that the MMAv2/MMAv3 loaders, the int4 path and
+// everything above them now use. Every other layout gets the plain element
+// type.
 Type TritonGPUToLLVMTypeConverter::getElementTypeForStruct(
     TensorOrMemDesc type) {
   auto ctx = type.getContext();
@@ -80,7 +89,7 @@ Type TritonGPUToLLVMTypeConverter::getElementTypeForStruct(
     return elemTy;
   auto mmaParent =
       mlir::dyn_cast<NvidiaMmaEncodingAttr>(dotOpLayout.getParent());
-  if (!mmaParent || mmaParent.isHopper())
+  if (!mmaParent || !mmaParent.isVolta())
     return elemTy;
   int bitwidth = elemTy.getIntOrFloatBitWidth();
   assert(bitwidth <= 32);

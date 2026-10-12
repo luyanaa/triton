@@ -86,6 +86,30 @@ def TT_BitcastOp : TT_Op<"bitcast", [Elementwise,
     // TODO: Add verifier
 }
 
+// Reinterpret a packed int32 tensor as int4, expanding dimension `axis` by 8.
+// Each int32 holds 8 signed 4-bit values (LSB-first). Unlike bitcast this
+// changes both shape (axis dim x8) and element width, so it does NOT carry the
+// SameOperandsAndResultShape/SameOperandsAndResultEncoding traits. The result
+// is bit-identical to the source at the register level under an i4 dot-operand
+// layout (kWidth=8): the 8 contiguous-K int4 occupy the same 32 bits as the
+// source int32.
+//
+// `axis` is the contraction (K) dimension: for a left operand [M, K/8] it is 1,
+// for a right operand [K/8, N] it is 0 -- this lands K where the dot expects it
+// without an i4 transpose, which would need an i4 shared-memory allocation
+// (illegal: the shared element width must be a multiple of 8 bits). Feeds the
+// Turing s4 Tensor Core path (mma.sync.aligned.m8n8k32).
+def TT_ReinterpretAsInt4Op : TT_Op<"reinterpret_as_int4", [Pure]> {
+    let summary = "Reinterpret a packed int32 tensor as unpacked int4";
+
+    let arguments = (ins TT_IntTensor:$src, I32Attr:$axis);
+
+    let results = (outs TT_IntTensor:$result);
+
+    let assemblyFormat = "$src attr-dict `:` type($src) `->` type($result)";
+    let hasVerifier = 1;
+}
+
 def TT_FpToFpOp : TT_Op<"fp_to_fp", [SameOperandsAndResultShape,
                                      SameOperandsAndResultEncoding,
                                      Pure,
@@ -685,15 +709,15 @@ def TT_DotScaledOp : TT_Op<"dot_scaled", [Pure,
 
     let arguments = (
       ins
-      // inputs are integer types as they are packed types and we currently
-      // don't have a representation for those.
-      TT_IntTensor:$lhs,
-      TT_IntTensor:$rhs,
+      // inputs are floats if we have a type for them, otherwise (fp4),
+      // they are packed in pairs in an I8Tensor
+      RankedTensorOf<[TT_Float,I8]>:$lhs,
+      RankedTensorOf<[TT_Float,I8]>:$rhs,
       TT_FloatTensor:$c,
-      TT_IntTensor:$lhs_scale,
-      Optional<TT_IntTensor>:$rhs_scale,
-      TT_F8F6F4TypeAttr:$lhs_type,
-      TT_F8F6F4TypeAttr:$rhs_type
+      RankedTensorOf<[I8]>:$lhs_scale,
+      Optional<RankedTensorOf<[I8]>>:$rhs_scale,
+      TT_ScaleDotElemTypeAttr:$lhs_type,
+      TT_ScaleDotElemTypeAttr:$rhs_type
     );
 
     let results = (outs TT_FloatTensor:$d);

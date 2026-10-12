@@ -286,7 +286,7 @@ def check_bit_width(value, shift_value):
 
 
 class dtype:
-    SINT_TYPES = ['int8', 'int16', 'int32', 'int64']
+    SINT_TYPES = ['int4', 'int8', 'int16', 'int32', 'int64']
     UINT_TYPES = ['int1', 'uint8', 'uint16', 'uint32', 'uint64']
     FP_TYPES = ['fp8e4b15', 'fp8e4nv', 'fp8e4b8', 'fp8e5', 'fp8e5b16', 'fp16', 'bf16', 'fp32', 'fp64']
     STANDARD_FP_TYPES = ['fp16', 'bf16', 'fp32', 'fp64']
@@ -387,6 +387,9 @@ class dtype:
 
     def is_int1(self):
         return self.name == 'int1'
+
+    def is_int4(self):
+        return self.name == 'int4'
 
     def is_int8(self):
         return self.name == 'int8'
@@ -501,6 +504,8 @@ class dtype:
             return builder.get_void_ty()
         elif self.name == 'int1':
             return builder.get_int1_ty()
+        elif self.name == 'int4':
+            return builder.get_int4_ty()
         elif self.name in ('int8', 'uint8'):
             return builder.get_int8_ty()
         elif self.name in ('int16', 'uint16'):
@@ -664,6 +669,7 @@ class function_type(dtype):
 # scalar types
 void = dtype('void')
 int1 = dtype('int1')
+int4 = dtype('int4')
 int8 = dtype('int8')
 int16 = dtype('int16')
 int32 = dtype('int32')
@@ -1512,6 +1518,31 @@ def cast(input, dtype: dtype, fp_downcast_rounding: Optional[str] = None, bitcas
 
 
 @builtin
+def reinterpret_as_int4(input, axis=-1, _builder=None):
+    """
+    Reinterpret a packed int32 tensor as an unpacked int4 tensor, expanding
+    dimension :code:`axis` by 8 (each int32 holds 8 signed 4-bit values,
+    LSB-first).
+
+    int4 has no PyTorch storage type, so int4 matrix-multiply operands are
+    supplied as int32 tensors with the contraction (K) dimension packed by 8
+    and reinterpreted to int4 right before :code:`tl.dot`. This is a
+    register-level relabel: the int32 bits go into the int4 Tensor Core path
+    unchanged (Turing m8n8k32).
+
+    :code:`axis` is the contraction dimension to expand: the left operand
+    :code:`[M, K // 8]` uses axis=1 (the default, last axis); the right operand
+    :code:`[K // 8, N]` uses axis=0, so K lands where the dot expects it without
+    an i4 transpose.
+
+    :param input: an int32 tensor with the packed K // 8 along :code:`axis`.
+    :param axis: the dimension to expand by 8.
+    """
+    axis = _unwrap_if_constexpr(axis)
+    return semantic.reinterpret_as_int4(input, axis, _builder)
+
+
+@builtin
 def dot(input, other, acc=None, input_precision=None, allow_tf32=None, max_num_imprecise_acc=None, out_dtype=float32,
         _builder=None):
     """
@@ -1555,15 +1586,17 @@ def dot_scaled(lhs, lhs_scale, lhs_format, rhs, rhs_scale, rhs_format, acc=None,
     lhs and rhs use microscaling formats described here:
     https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
     :param lhs: The first tensor to be multiplied.
-    :type lhs: 2D tensor of f8, f6 or f4 format packed in int32 format.
+    :type lhs: 2D tensor representing fp4 or fp8 elements packed into uint8 for fp4 inputs, or in uint8 or the corresponding fp8 type for fp8 inputs.
     :param lhs_scale: Scale factor for lhs tensor.
-    :type lhs_scale: ue8m0 float8 type (currently represented as an int8 tensor).
-    :param lhs_format: format of the lhs tensor, available formats: {:code:`e4m3`, :code: `e5m2`, :code:`e2m3`, :code:`e3m2`, :code:`e2m1`}.
+    :type lhs_scale: e8m0 type represented as an uint8 tensor.
+    :param lhs_format: format of the lhs tensor. Available formats: {:code:`e2m1`, :code:`e4m3`, :code: `e5m2`}.
+    :type lhs_format: str
     :param rhs: The second tensor to be multiplied.
-    :type rhs: 2D tensor of f8, f6 or f4 format packed in int32 format.
+    :type rhs: 2D tensor representing fp8 or bf16 elements in uint8 or the corresponding fp8 type for fp8 inputs or bf16 for bf16 inputs.
     :param rhs_scale: Scale factor for rhs tensor.
-    :type rhs_scale: ue8m0 float8 type (currently represented as an int8 tensor).
-    :param rhs_format: format of the rhs tensor, available formats: {:code:`e4m3`, :code: `e5m2`, :code:`e2m3`, :code:`e3m2`, :code:`e2m1`}.
+    :type rhs_scale: e8m0 type represented as an uint8 tensor.
+    :param rhs_format: format of the rhs tensor. Available formats: {:code:`e4m3`, :code: `e5m2`, :code:`bf16`}.
+    :type rhs_format: str
     :param acc: The accumulator tensor. If not None, the result is added to this tensor.
     """
     out_dtype = _constexpr_to_value(out_dtype)

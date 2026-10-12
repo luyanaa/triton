@@ -41,6 +41,10 @@ void populateUpcastMXFPToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                       const TargetInfo &targetInfo,
                                       PatternBenefit benefit);
 
+void populateReinterpretAsInt4OpToLLVMPatterns(LLVMTypeConverter &typeConverter,
+                                               RewritePatternSet &patterns,
+                                               PatternBenefit benefit);
+
 void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        const TargetInfo &targetInfo,
                                        RewritePatternSet &patterns,
