@@ -18,6 +18,7 @@ inline const std::set<std::string> CACHE_INVALIDATING_ENV_VARS = {
     "DISABLE_LLVM_OPT",
     "DISABLE_MMA_V3",
     "DISABLE_PTXAS_OPT",
+    "KUNLUN_LM_BYTES",
     "LLVM_IR_ENABLE_DUMP",
     "LLVM_ENABLE_TIMING",
     "LLVM_PASS_PLUGIN_PATH",
